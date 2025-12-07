@@ -1,11 +1,11 @@
+
 import logging
 import random
 import json
 import datetime
-import asyncio
 import os
 from enum import Enum
-from typing import Dict, List
+from typing import Dict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, 
@@ -14,13 +14,11 @@ from telegram.ext import (
     MessageHandler, 
     filters, 
     ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    TypeHandler
+    ConversationHandler
 )
-from dotenv import load_dotenv
 
 # Загружаем токен из .env файла
+from dotenv import load_dotenv
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
@@ -30,18 +28,15 @@ if not TELEGRAM_TOKEN:
     print("TELEGRAM_BOT_TOKEN=ваш_токен_здесь")
     exit(1)
 
-# ========== ГЛОБАЛЬНЫЙ РЕЖИМ СНА БОТА ==========
-BOT_SLEEP_MODE = False
-BOT_SLEEP_UNTIL = None
-BOT_SLEEP_REASON = "автоматический сон"
-# ===============================================
-
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# ГЛОБАЛЬНЫЙ ФЛАГ СОСТОЯНИЯ СНА БОТА
+BOT_IS_SLEEPING = False
 
 # Состояния персонажа
 class Gender(Enum):
@@ -56,8 +51,6 @@ class Mood(Enum):
     SICK = "🤒 Болен"
     EXCITED = "🤩 В восторге"
     TIRED = "😪 Уставший"
-    SLEEPING = "💤 Спит"
-    BUSY = "⏳ Занят"
 
 class AgeGroup(Enum):
     BABY = "младенец (0-2)"
@@ -160,10 +153,9 @@ class EventGenerator:
 
 # Класс Тамагочи
 class Tamagochi:
-    def __init__(self, name: str, gender: Gender, owner_id: int):
+    def __init__(self, name: str, gender: Gender):
         self.name = name
         self.gender = gender
-        self.owner_id = owner_id
         self.age_days = 0
         self.age_group = AgeGroup.BABY
         
@@ -181,25 +173,12 @@ class Tamagochi:
         self.reputation = 50
         self.creativity = 50
         
-        # Состояния и ограничения
+        # Состояния
         self.is_sleeping = True
         self.is_sick = False
         self.is_at_school = False
         self.location = "дом"
         self.current_activity = None
-        
-        # Система отдыха и ограничений
-        self.is_resting = False
-        self.rest_end_time = None
-        self.last_action_time = datetime.datetime.now()
-        self.consecutive_study = 0
-        self.consecutive_play = 0
-        self.actions_today = 0
-        
-        # Таймеры для автоматических действий
-        self.sleep_end_time = None
-        self.meal_cooldown = None
-        self.study_cooldown = None
         
         # Достижения и история
         self.skills = {
@@ -216,7 +195,6 @@ class Tamagochi:
         }
         self.career_points = 0
         self.criminal_points = 0
-        self.rating_points = 0  # Очки для турнирной таблицы
         self.inventory = []
         self.friends = []
         self.relationships = {}
@@ -225,7 +203,6 @@ class Tamagochi:
         self.last_meal = None
         self.last_bath = None
         self.last_study = None
-        self.last_play = None
         
         # Генератор событий
         self.event_gen = EventGenerator()
@@ -250,14 +227,6 @@ class Tamagochi:
     def update_mood(self):
         if self.is_sick:
             self.mood = Mood.SICK
-            return
-        
-        if self.is_resting:
-            self.mood = Mood.BUSY
-            return
-            
-        if self.is_sleeping:
-            self.mood = Mood.SLEEPING
             return
             
         mood_score = (
@@ -317,107 +286,12 @@ class Tamagochi:
         self.energy = max(0, min(100, self.energy))
         self.happiness = max(0, min(100, self.happiness))
         
-        # Проверка таймеров
-        self._check_timers()
-        
         self.update_mood()
-    
-    def _check_timers(self):
-        now = datetime.datetime.now()
-        
-        # Проверка отдыха
-        if self.is_resting and self.rest_end_time and now >= self.rest_end_time:
-            self.is_resting = False
-            self.rest_end_time = None
-            self.energy = min(100, self.energy + 30)
-            self.happiness = min(100, self.happiness + 10)
-        
-        # Проверка сна
-        if self.is_sleeping and self.sleep_end_time and now >= self.sleep_end_time:
-            self.is_sleeping = False
-            self.sleep_end_time = None
-            self.energy = min(100, self.energy + 50)
-    
-    def start_rest(self, hours: int = 1):
-        self.is_resting = True
-        self.rest_end_time = datetime.datetime.now() + datetime.timedelta(hours=hours)
-        self.current_activity = f"отдыхает {hours} час"
-        return f"{self.name} начал{'а' if self.gender == Gender.GIRL else ''} отдыхать. Вернется через {hours} час(а/ов). ⏳"
-    
-    def start_sleep(self, hours: int = 8):
-        self.is_sleeping = True
-        self.sleep_end_time = datetime.datetime.now() + datetime.timedelta(hours=hours)
-        self.current_activity = f"спит {hours} часов"
-        return f"{self.name} лег{'ла' if self.gender == Gender.GIRL else ''} спать на {hours} часов. 💤"
-    
-    def can_perform_action(self, action_type: str) -> tuple:
-        """Проверяет, можно ли выполнить действие. Возвращает (можно_ли, сообщение_об_ошибке)"""
-        now = datetime.datetime.now()
-        
-        if self.is_resting:
-            time_left = self.rest_end_time - now
-            hours = int(time_left.total_seconds() // 3600)
-            minutes = int((time_left.total_seconds() % 3600) // 60)
-            return False, f"{self.name} отдыхает. Вернется через {hours}ч {minutes}м. ⏳"
-        
-        if self.is_sleeping:
-            time_left = self.sleep_end_time - now
-            hours = int(time_left.total_seconds() // 3600)
-            minutes = int((time_left.total_seconds() % 3600) // 60)
-            return False, f"{self.name} спит. Проснется через {hours}ч {minutes}м. 💤"
-        
-        # Проверка кулдаунов
-        if action_type == "feed" and self.meal_cooldown and now < self.meal_cooldown:
-            time_left = self.meal_cooldown - now
-            minutes = int(time_left.total_seconds() // 60)
-            return False, f"{self.name} не голоден{'на' if self.gender == Gender.GIRL else ''}. Можно покормить через {minutes} минут. 🍽️"
-        
-        if action_type == "study" and self.study_cooldown and now < self.study_cooldown:
-            time_left = self.study_cooldown - now
-            minutes = int(time_left.total_seconds() // 60)
-            return False, f"{self.name} устал{'а' if self.gender == Gender.GIRL else ''} от учебы. Можно учить через {minutes} минут. 📚"
-        
-        # Проверка последовательных действий
-        if action_type == "study":
-            self.consecutive_study += 1
-            self.consecutive_play = 0
-            if self.consecutive_study >= 4:
-                return False, f"{self.name} переутомился{'ась' if self.gender == Gender.GIRL else ''} от учебы! Нужен отдых 1 час. 😴"
-        
-        elif action_type == "play":
-            self.consecutive_play += 1
-            self.consecutive_study = 0
-            if self.consecutive_play >= 3:
-                return True, "play_with_cooldown"  # Особый случай - можно поиграть, но потом отдых
-        
-        else:
-            self.consecutive_study = 0
-            self.consecutive_play = 0
-        
-        # Ограничение действий в день
-        self.actions_today += 1
-        if self.actions_today > 20:
-            return False, f"{self.name} устал{'а' if self.gender == Gender.GIRL else ''} за сегодня. Отдохните до завтра! 🌙"
-        
-        return True, ""
-    
-    def update_rating(self):
-        """Обновление рейтинговых очков для турнирной таблицы"""
-        self.rating_points = (
-            self.career_points * 2 +
-            self.intelligence * 3 +
-            self.discipline * 2 +
-            self.social * 1 +
-            self.creativity * 1 -
-            self.criminal_points * 5
-        )
-        return self.rating_points
     
     def to_dict(self):
         return {
             "name": self.name,
             "gender": self.gender.value,
-            "owner_id": self.owner_id,
             "age_days": self.age_days,
             "age_group": self.age_group.value,
             "health": self.health,
@@ -434,14 +308,9 @@ class Tamagochi:
             "reputation": self.reputation,
             "is_sleeping": self.is_sleeping,
             "is_sick": self.is_sick,
-            "is_resting": self.is_resting,
-            "rest_end_time": self.rest_end_time.isoformat() if self.rest_end_time else None,
-            "sleep_end_time": self.sleep_end_time.isoformat() if self.sleep_end_time else None,
             "skills": self.skills,
             "career_points": self.career_points,
             "criminal_points": self.criminal_points,
-            "rating_points": self.rating_points,
-            "actions_today": self.actions_today,
             "inventory": self.inventory,
             "friends": self.friends
         }
@@ -449,8 +318,7 @@ class Tamagochi:
     @classmethod
     def from_dict(cls, data: dict):
         gender = Gender(data["gender"])
-        owner_id = data.get("owner_id", 0)
-        tamagochi = cls(data["name"], gender, owner_id)
+        tamagochi = cls(data["name"], gender)
         
         tamagochi.age_days = data["age_days"]
         tamagochi.age_group = AgeGroup(data["age_group"])
@@ -473,239 +341,121 @@ class Tamagochi:
         tamagochi.reputation = data["reputation"]
         tamagochi.is_sleeping = data.get("is_sleeping", False)
         tamagochi.is_sick = data.get("is_sick", False)
-        tamagochi.is_resting = data.get("is_resting", False)
-        
-        # Восстанавливаем время из строк
-        if data.get("rest_end_time"):
-            tamagochi.rest_end_time = datetime.datetime.fromisoformat(data["rest_end_time"])
-        if data.get("sleep_end_time"):
-            tamagochi.sleep_end_time = datetime.datetime.fromisoformat(data["sleep_end_time"])
-            
         tamagochi.skills = data["skills"]
         tamagochi.career_points = data["career_points"]
         tamagochi.criminal_points = data["criminal_points"]
-        tamagochi.rating_points = data.get("rating_points", 0)
-        tamagochi.actions_today = data.get("actions_today", 0)
         tamagochi.inventory = data["inventory"]
         tamagochi.friends = data["friends"]
         
         return tamagochi
 
-# Турнирная система
-class Tournament:
-    def __init__(self):
-        self.leaderboard = {}  # {user_id: {"name": имя_ребенка, "rating": очки, "owner_name": имя_владельца}}
-        self.last_updated = datetime.datetime.now()
-    
-    def update_player(self, user_id: int, tamagochi: Tamagochi, owner_name: str):
-        rating = tamagochi.update_rating()
-        self.leaderboard[user_id] = {
-            "name": tamagochi.name,
-            "rating": rating,
-            "owner_name": owner_name,
-            "age": tamagochi.age_days // 365,
-            "career": tamagochi.career_points,
-            "criminal": tamagochi.criminal_points
-        }
-        self.last_updated = datetime.datetime.now()
-    
-    def get_leaderboard(self, limit: int = 10) -> List[dict]:
-        """Возвращает отсортированный список лидеров"""
-        sorted_players = sorted(
-            self.leaderboard.items(),
-            key=lambda x: x[1]["rating"],
-            reverse=True
-        )
-        return [(user_id, data) for user_id, data in sorted_players[:limit]]
-    
-    def get_player_position(self, user_id: int) -> int:
-        """Возвращает позицию игрока в турнирной таблице (1-based)"""
-        if user_id not in self.leaderboard:
-            return 0
-        
-        sorted_players = sorted(
-            self.leaderboard.items(),
-            key=lambda x: x[1]["rating"],
-            reverse=True
-        )
-        
-        for i, (uid, _) in enumerate(sorted_players, 1):
-            if uid == user_id:
-                return i
-        return 0
-    
-    def to_dict(self):
-        return {
-            "leaderboard": self.leaderboard,
-            "last_updated": self.last_updated.isoformat()
-        }
-    
-    @classmethod
-    def from_dict(cls, data: dict):
-        tournament = cls()
-        tournament.leaderboard = data.get("leaderboard", {})
-        if data.get("last_updated"):
-            tournament.last_updated = datetime.datetime.fromisoformat(data["last_updated"])
-        return tournament
-
 # Глобальное хранилище данных
 user_tamagochi = {}
-user_names = {}  # Храним имена пользователей для турнирной таблицы
-tournament = Tournament()
 user_save_file = "tamagochi_data.json"
-tournament_save_file = "tournament_data.json"
-
-# ========== ГЛОБАЛЬНЫЙ РЕЖИМ СНА БОТА ==========
-BOT_SLEEP_MODE = False
-BOT_SLEEP_UNTIL = None
-BOT_SLEEP_REASON = "автоматический сон"
-# ===============================================
 
 def load_data():
-    global user_tamagochi, tournament
+    global user_tamagochi
     try:
         with open(user_save_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
             for user_id, tam_data in data.items():
                 user_tamagochi[int(user_id)] = Tamagochi.from_dict(tam_data)
-        logger.info("Данные тамагочи загружены")
+        logger.info("Данные загружены")
     except FileNotFoundError:
-        logger.info("Файл данных тамагочи не найден, создаем новый")
-    
-    try:
-        with open(tournament_save_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            tournament = Tournament.from_dict(data)
-        logger.info("Данные турнира загружены")
-    except FileNotFoundError:
-        logger.info("Файл турнира не найден, создаем новый")
+        logger.info("Файл данных не найден, создаем новый")
 
 def save_data():
-    # Сохраняем тамагочи
     data = {}
     for user_id, tamagochi in user_tamagochi.items():
         data[str(user_id)] = tamagochi.to_dict()
     
     with open(user_save_file, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    
-    # Сохраняем турнир
-    with open(tournament_save_file, 'w', encoding='utf-8') as f:
-        json.dump(tournament.to_dict(), f, ensure_ascii=False, indent=2)
-    
     logger.info("Данные сохранены")
 
-# ========== ФУНКЦИИ ГЛОБАЛЬНОГО СНА БОТА ==========
-def is_bot_sleeping() -> bool:
-    """Проверяет, спит ли бот (глобально)"""
-    global BOT_SLEEP_MODE, BOT_SLEEP_UNTIL
+# ====== ФУНКЦИЯ ДЛЯ ПРОВЕРКИ СНА БОТА ======
+async def check_bot_sleep(update: Update, context: ContextTypes.DEFAULT_TYPE, command_to_check: str = None) -> bool:
+    """
+    Проверяет, спит ли бот. Если спит и команда не /wakeup - игнорирует сообщение.
+    Возвращает True если нужно обрабатывать сообщение, False если игнорировать.
+    """
+    global BOT_IS_SLEEPING
     
-    if not BOT_SLEEP_MODE:
-        return False
+    if BOT_IS_SLEEPING:
+        # Если бот спит, проверяем, это команда /wakeup?
+        if update.message and update.message.text:
+            text = update.message.text.lower()
+            # Разрешаем только команду /wakeup
+            if text.startswith('/wakeup'):
+                return True  # Обрабатываем /wakeup
+            # Все остальные сообщения игнорируем
+            return False  # Игнорируем
+        elif update.callback_query:
+            # Все callback-запросы игнорируем
+            return False
     
-    now = datetime.datetime.now()
-    if BOT_SLEEP_UNTIL and now >= BOT_SLEEP_UNTIL:
-        # Время сна вышло
-        BOT_SLEEP_MODE = False
-        BOT_SLEEP_UNTIL = None
-        logger.info("🤖 Бот автоматически проснулся от сна")
-        return False
-    
+    # Если бот не спит - обрабатываем всё
     return True
 
-async def sleep_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для усыпления бота"""
-    global BOT_SLEEP_MODE, BOT_SLEEP_UNTIL, BOT_SLEEP_REASON
+# ====== КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ СНОМ БОТА ======
+async def sleep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Укладывает бота спать"""
+    global BOT_IS_SLEEPING
     
-    if is_bot_sleeping():
-        # Бот уже спит, ничего не делаем
+    # Проверяем, не спит ли уже бот
+    if not await check_bot_sleep(update, context, "/sleep"):
         return
     
-    try:
-        hours = int(context.args[0]) if context.args else 8
-    except ValueError:
-        hours = 8
-    
-    BOT_SLEEP_MODE = True
-    BOT_SLEEP_UNTIL = datetime.datetime.now() + datetime.timedelta(hours=hours)
-    BOT_SLEEP_REASON = f"команда от пользователя {update.effective_user.id}"
+    BOT_IS_SLEEPING = True
+    logger.info(f"Бот уснул по команде от пользователя {update.effective_user.id}")
     
     await update.message.reply_text(
-        f"🤖 Бот переходит в режим полного сна на {hours} часов. 💤\n\n"
-        f"⏰ Проснется в: {BOT_SLEEP_UNTIL.strftime('%H:%M (%d.%m)')}\n"
-        f"📅 До пробуждения: {BOT_SLEEP_UNTIL - datetime.datetime.now()}\n\n"
-        f"⚠️ В режиме сна бот:\n"
-        f"• Не отвечает на ЛЮБЫЕ сообщения\n"
-        f"• Не отправляет никаких уведомлений\n"
-        f"• Полностью игнорирует чат\n\n"
-        f"🔔 Используйте /wakeup чтобы разбудить досрочно."
+        "💤 Бот засыпает... Zzz\n\n"
+        "Теперь бот не будет реагировать на сообщения.\n"
+        "Чтобы разбудить бота, используйте команду: /wakeup"
     )
-    
-    logger.info(f"🤖 Бот уснул на {hours} часов по команде от {update.effective_user.id}")
 
-async def wakeup_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для пробуждения бота"""
-    global BOT_SLEEP_MODE, BOT_SLEEP_UNTIL
+async def wakeup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Будит бота"""
+    global BOT_IS_SLEEPING
     
-    if not BOT_SLEEP_MODE:
-        await update.message.reply_text("🤖 Бот уже не спит! ☀️")
+    BOT_IS_SLEEPING = False
+    logger.info(f"Бот проснулся по команде от пользователя {update.effective_user.id}")
+    
+    await update.message.reply_text(
+        "☀️ Бот проснулся и готов к работе!\n\n"
+        "Теперь бот снова отвечает на команды.\n"
+        "Чтобы уложить спать: /sleep"
+    )
+
+async def status_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает состояние бота (спит или нет)"""
+    global BOT_IS_SLEEPING
+    
+    # Проверяем, не спит ли бот (для этой команды делаем исключение)
+    if not await check_bot_sleep(update, context, "/status_bot"):
         return
     
-    BOT_SLEEP_MODE = False
-    BOT_SLEEP_UNTIL = None
+    if BOT_IS_SLEEPING:
+        status_text = "💤 Бот спит\nИгнорирует все сообщения кроме /wakeup"
+    else:
+        status_text = "☀️ Бот бодрствует\nОтвечает на все команды"
     
     await update.message.reply_text(
-        "🤖 Бот проснулся и готов к работе! ☀️\n"
-        "Все команды снова активны!"
-    )
-    
-    logger.info(f"🤖 Бот разбужен командой от {update.effective_user.id}")
-
-async def check_sleep_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для проверки статуса сна бота"""
-    global BOT_SLEEP_MODE, BOT_SLEEP_UNTIL, BOT_SLEEP_REASON
-    
-    if not BOT_SLEEP_MODE:
-        await update.message.reply_text("🤖 Бот не спит, работает в обычном режиме. ☀️")
-        return
-    
-    now = datetime.datetime.now()
-    time_left = BOT_SLEEP_UNTIL - now
-    hours = int(time_left.total_seconds() // 3600)
-    minutes = int((time_left.total_seconds() % 3600) // 60)
-    
-    await update.message.reply_text(
-        f"🤖 Бот находится в режиме полного сна. 💤\n\n"
-        f"⏰ Проснется в: {BOT_SLEEP_UNTIL.strftime('%H:%M (%d.%m)')}\n"
-        f"⏳ Осталось спать: {hours}ч {minutes}м\n"
-        f"📝 Причина: {BOT_SLEEP_REASON}\n\n"
-        f"🔔 Используйте /wakeup чтобы разбудить досрочно."
+        f"🤖 СОСТОЯНИЕ БОТА:\n\n{status_text}\n\n"
+        f"Команды управления:\n"
+        f"/sleep - уложить бота спать\n"
+        f"/wakeup - разбудить бота\n"
+        f"/status_bot - проверить состояние"
     )
 
-class SleepFilter:
-    """Фильтр, который полностью игнорирует сообщения когда бот спит"""
-    
-    async def __call__(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-        # Если бот спит - ИГНОРИРУЕМ ВСЕ сообщения
-        if is_bot_sleeping():
-            # Логируем, но не отвечаем
-            logger.info(f"🤖 Игнорируем сообщение от {update.effective_user.id} (бот в режиме сна)")
-            return False  # Не пропускаем сообщение дальше
-        
-        # Если бот не спит - пропускаем сообщение
-        return True
-
-# ================================================
-
-# Команды бота
+# ====== ОБНОВЛЁННЫЕ КОМАНДЫ БОТА С ПРОВЕРКОЙ СНА ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "/start"):
+        return
     
     user_id = update.effective_user.id
-    user_name = update.effective_user.first_name or "Игрок"
-    user_names[user_id] = user_name
     
     if user_id in user_tamagochi:
         await show_status(update, context)
@@ -718,13 +468,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        f"👋 Привет, {user_name}! Добро пожаловать в игру 'Виртуальный ребенок'!\n\n"
+        "👋 Добро пожаловать в игру 'Виртуальный ребенок'!\n\n"
         "Вы становитесь родителем ребенка, который будет расти и развиваться.\n"
-        "Теперь доступны соревнования с другими игроками! 🏆\n\n"
-        "Новые команды сна:\n"
-        f"/sleepbot [часы] - усыпить бота на время (по умолчанию 8 часов)\n"
-        f"/wakeup - разбудить бота досрочно\n"
-        f"/sleepstatus - статус сна бота\n\n"
+        "Ваши решения повлияют на его будущее!\n\n"
         "К 13 годам ребенок может:\n"
         "✅ Разбогатеть и стать успешным\n"
         "❌ Попасть в тюрьму из-за плохого воспитания\n\n"
@@ -733,9 +479,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def set_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "set_gender"):
+        return
     
     query = update.callback_query
     await query.answer()
@@ -750,39 +496,31 @@ async def set_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "set_name"):
+        return
     
     user_id = update.effective_user.id
     name = update.message.text.strip()
-    user_name = user_names.get(user_id, "Игрок")
     
     if not name or len(name) > 20:
         await update.message.reply_text("Имя должно быть от 1 до 20 символов. Попробуйте еще раз:")
         return
     
     gender = context.user_data.get('gender', Gender.BOY)
-    tamagochi = Tamagochi(name, gender, user_id)
+    tamagochi = Tamagochi(name, gender)
     user_tamagochi[user_id] = tamagochi
-    
-    # Добавляем в турнирную таблицу
-    tournament.update_player(user_id, tamagochi, user_name)
     
     save_data()
     
     await update.message.reply_text(
-        f"🎉 Поздравляем, {user_name}! У вас родился{'ся' if gender == Gender.BOY else 'ась'} {name}!\n\n"
-        f"Теперь вы можете ухаживать за своим ребенком и соревноваться с другими!\n\n"
-        f"Новые команды:\n"
-        f"/sleepbot - усыпить бота на время (8 часов по умолчанию)\n"
-        f"/wakeup - разбудить бота досрочно\n"
-        f"/sleepstatus - статус сна бота\n"
-        f"/sleep - уложить спать на 8 часов (персонажа)\n"
-        f"/rest - отдохнуть 1 час (персонажа)\n"
-        f"/tournament - турнирная таблица\n"
-        f"/rating - ваш рейтинг\n\n"
-        f"Старые команды:\n"
+        f"🎉 Поздравляем! У вас родился{'ся' if gender == Gender.BOY else 'ась'} {name}!\n\n"
+        f"Теперь вы можете ухаживать за своим ребенком.\n\n"
+        f"Новые команды управления ботом:\n"
+        f"/sleep - уложить бота спать\n"
+        f"/wakeup - разбудить бота\n"
+        f"/status_bot - состояние бота\n\n"
+        f"Основные команды игры:\n"
         f"/status - состояние ребенка\n"
         f"/daily - ежедневная рутина\n"
         f"/care - уход за ребенком\n"
@@ -794,18 +532,17 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update, context)
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "show_main_menu"):
+        return
     
     keyboard = [
         [InlineKeyboardButton("📊 Статус", callback_data="action_status")],
         [InlineKeyboardButton("🌅 День ребенка", callback_data="action_daily")],
         [InlineKeyboardButton("👶 Уход", callback_data="action_care")],
-        [InlineKeyboardButton("💤 Сон/Отдых", callback_data="action_rest")],
-        [InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
+        [InlineKeyboardButton("🎭 Событие", callback_data="action_event")],
         [InlineKeyboardButton("🔮 Судьба", callback_data="action_destiny")],
-        [InlineKeyboardButton("🤖 Управление ботом", callback_data="action_bot_control")]
+        [InlineKeyboardButton("🔄 Сбросить день", callback_data="action_reset_day")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -820,35 +557,10 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup
         )
 
-async def bot_control_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Меню управления сном бота"""
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
-    
-    keyboard = [
-        [InlineKeyboardButton("🤖 Усыпить бота (8ч)", callback_data="bot_sleep_8"),
-         InlineKeyboardButton("🤖 Усыпить бота (4ч)", callback_data="bot_sleep_4")],
-        [InlineKeyboardButton("🤖 Усыпить бота (1ч)", callback_data="bot_sleep_1"),
-         InlineKeyboardButton("☀️ Разбудить бота", callback_data="bot_wakeup")],
-        [InlineKeyboardButton("📊 Статус сна бота", callback_data="bot_sleep_status"),
-         InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "🤖 *Управление сном бота:*\n\n"
-        "В этом меню вы можете управлять глобальным сном бота.\n"
-        "Когда бот спит, он НЕ ОТВЕЧАЕТ на ЛЮБЫЕ сообщения.\n\n"
-        "Выберите действие:",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "/status"):
+        return
     
     user_id = update.effective_user.id
     
@@ -858,9 +570,6 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     tamagochi = user_tamagochi[user_id]
     
-    # Обновляем естественные изменения
-    tamagochi.natural_changes()
-    
     age_years = tamagochi.age_days // 365
     age_months = (tamagochi.age_days % 365) // 30
     
@@ -869,25 +578,19 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filled = int(value / max_value * 10)
         return "█" * filled + "░" * (10 - filled)
     
-    # Получаем позицию в турнире
-    position = tournament.get_player_position(user_id)
-    rating = tamagochi.update_rating()
-    
-    # Проверяем глобальный сон бота
-    bot_sleep_status = "💤 СПИТ" if is_bot_sleeping() else "☀️ БОДРСТВУЕТ"
+    # Показываем состояние бота в статусе
+    global BOT_IS_SLEEPING
+    bot_status = "💤 Спит" if BOT_IS_SLEEPING else "☀️ Бодрствует"
     
     status_text = f"""
-🤖 *Статус бота:* {bot_sleep_status}
-
 👤 *{tamagochi.name}* ({tamagochi.gender.value})
-👑 Владелец: {user_names.get(user_id, 'Игрок')}
-🏆 Рейтинг: {rating} очков (Место #{position if position > 0 else 'не в таблице'})
+🤖 *Состояние бота:* {bot_status}
 
 🎂 *Возраст:* {age_years} лет, {age_months} месяцев ({tamagochi.age_days} дней)
 📊 *Группа:* {tamagochi.age_group.value}
 🎭 *Настроение:* {tamagochi.mood.value}
 📍 *Локация:* {tamagochi.location}
-{'💤 *Спит*' if tamagochi.is_sleeping else '⏳ *Занят*' if tamagochi.is_resting else '👁️ *Бодрствует*'}
+{'💤 *Спит*' if tamagochi.is_sleeping else '👁️ *Бодрствует*'}
 {'🤒 *Болен*' if tamagochi.is_sick else '✅ *Здоров*'}
 
 📈 *ОСНОВНЫЕ ПОКАЗАТЕЛИ:*
@@ -920,16 +623,13 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 🍽️ Приемов пищи: {tamagochi.daily_stats['meals_eaten']}
 • 📖 Учебы: {tamagochi.daily_stats['studied']}
 • 🎮 Развлечений: {tamagochi.daily_stats['entertainment']}
-• ⚡ Действий: {tamagochi.actions_today}/20
     """
     
     keyboard = [
         [InlineKeyboardButton("🔄 Обновить", callback_data="action_status"),
          InlineKeyboardButton("🌅 День ребенка", callback_data="action_daily")],
         [InlineKeyboardButton("👶 Уход", callback_data="action_care"),
-         InlineKeyboardButton("💤 Отдых", callback_data="action_rest")],
-        [InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament"),
-         InlineKeyboardButton("🤖 Управление", callback_data="action_bot_control")],
+         InlineKeyboardButton("🎭 Событие", callback_data="action_event")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -946,13 +646,11 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
-    
-    save_data()
 
 async def daily_routine(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "/daily"):
+        return
     
     user_id = update.effective_user.id
     
@@ -961,25 +659,15 @@ async def daily_routine(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     tamagochi = user_tamagochi[user_id]
-    
-    # Проверяем, можно ли выполнить действие
-    can_act, error_msg = tamagochi.can_perform_action("daily")
-    if not can_act:
-        await update.message.reply_text(error_msg)
-        return
-    
     events = []
     
-    # Сброс дневной статистики и счетчиков
+    # Сброс дневной статистики
     tamagochi.daily_stats = {
         "lessons_attended": 0,
         "meals_eaten": 0,
         "studied": 0,
         "entertainment": 0
     }
-    tamagochi.actions_today = 0
-    tamagochi.consecutive_study = 0
-    tamagochi.consecutive_play = 0
     
     # Обновление возраста и естественные изменения
     tamagochi.update_age()
@@ -1071,11 +759,10 @@ async def daily_routine(update: Update, context: ContextTypes.DEFAULT_TYPE):
     events.append(f"🛁 *Купание:* {tamagochi.name} помылся{'ась' if tamagochi.gender == Gender.GIRL else ''} в {bath_type}")
     
     # 11. СОН
-    tamagochi.start_sleep(8)
-    events.append(f"🌙 *Сон:* {tamagochi.name} лег{'ла' if tamagochi.gender == Gender.GIRL else ''} спать на 8 часов")
-    
-    # Обновляем турнирную таблицу
-    tournament.update_player(user_id, tamagochi, user_names.get(user_id, "Игрок"))
+    tamagochi.is_sleeping = True
+    tamagochi.energy = min(100, tamagochi.energy + 30)
+    tamagochi.health = min(100, tamagochi.health + 8)
+    events.append(f"🌙 *Сон:* {tamagochi.name} лег{'ла' if tamagochi.gender == Gender.GIRL else ''} спать")
     
     # Сохранение
     save_data()
@@ -1089,11 +776,10 @@ async def daily_routine(update: Update, context: ContextTypes.DEFAULT_TYPE):
     routine_text += f"• 🏫 Уроков посещено: {tamagochi.daily_stats['lessons_attended']}\n"
     routine_text += f"• 🍽️ Приемов пищи: {tamagochi.daily_stats['meals_eaten']}\n"
     routine_text += f"• 🎯 Карьерных очков: +{tamagochi.daily_stats['lessons_attended'] * 3}\n"
-    routine_text += f"• 🏆 Рейтинг обновлен: {tamagochi.update_rating()} очков"
     
     keyboard = [
         [InlineKeyboardButton("📊 Статус", callback_data="action_status"),
-         InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
+         InlineKeyboardButton("🎭 Событие", callback_data="action_event")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1105,32 +791,17 @@ async def daily_routine(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def care_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
-    
-    user_id = update.effective_user.id
-    
-    if user_id not in user_tamagochi:
-        await update.message.reply_text("У вас еще нет ребенка!")
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "care_menu"):
         return
     
-    tamagochi = user_tamagochi[user_id]
-    
-    # Проверяем доступность действий
-    can_feed = tamagochi.meal_cooldown is None or datetime.datetime.now() >= tamagochi.meal_cooldown
-    feed_text = "🍼 Покормить" if can_feed else "⏳ Не голоден"
-    
-    can_study = tamagochi.study_cooldown is None or datetime.datetime.now() >= tamagochi.study_cooldown
-    study_text = "📚 Учить" if can_study else "⏳ Устал"
-    
     keyboard = [
-        [InlineKeyboardButton(feed_text, callback_data="care_feed"),
+        [InlineKeyboardButton("🍼 Покормить", callback_data="care_feed"),
          InlineKeyboardButton("🛁 Помыть", callback_data="care_wash")],
         [InlineKeyboardButton("💤 Уложить спать", callback_data="care_sleep"),
          InlineKeyboardButton("☀️ Разбудить", callback_data="care_wake")],
         [InlineKeyboardButton("💊 Лечить", callback_data="care_heal"),
-         InlineKeyboardButton(study_text, callback_data="care_study")],
+         InlineKeyboardButton("📚 Учить", callback_data="care_study")],
         [InlineKeyboardButton("🎮 Играть", callback_data="care_play"),
          InlineKeyboardButton("🎨 Творить", callback_data="care_create")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
@@ -1151,9 +822,9 @@ async def care_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "handle_care"):
+        return
     
     query = update.callback_query
     await query.answer()
@@ -1167,19 +838,7 @@ async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tamagochi = user_tamagochi[user_id]
     action = query.data.split("_")[1]
     
-    # Проверяем, можно ли выполнить действие
-    can_act, error_msg = tamagochi.can_perform_action(action)
-    if not can_act:
-        if error_msg == "play_with_cooldown":
-            # Особый случай - можно поиграть, но потом будет отдых
-            pass
-        else:
-            await query.message.reply_text(error_msg)
-            await care_menu(update, context)
-            return
-    
     result_text = ""
-    cooldown_added = False
     
     if action == "feed":
         if tamagochi.hunger < 20:
@@ -1190,9 +849,6 @@ async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tamagochi.health = min(100, tamagochi.health + 5)
             result_text = f"🍼 Вы покормили {tamagochi.name}! Сытость повышена 😋"
             tamagochi.daily_stats["meals_eaten"] += 1
-            # Кулдаун на кормление: 1 час
-            tamagochi.meal_cooldown = datetime.datetime.now() + datetime.timedelta(hours=1)
-            cooldown_added = True
             
     elif action == "wash":
         if tamagochi.hygiene > 90:
@@ -1209,15 +865,16 @@ async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tamagochi.is_sleeping:
             result_text = f"{tamagochi.name} уже спит 💤"
         else:
-            result_text = tamagochi.start_sleep(8)
-            cooldown_added = True
+            tamagochi.is_sleeping = True
+            tamagochi.energy = min(100, tamagochi.energy + 30)
+            tamagochi.health = min(100, tamagochi.health + 10)
+            result_text = f"💤 Вы уложили {tamagochi.name} спать. Энергия восстанавливается 🌙"
             
     elif action == "wake":
         if not tamagochi.is_sleeping:
             result_text = f"{tamagochi.name} уже не спит ☀️"
         else:
             tamagochi.is_sleeping = False
-            tamagochi.sleep_end_time = None
             tamagochi.energy = min(100, tamagochi.energy + 20)
             result_text = f"☀️ Вы разбудили {tamagochi.name}! Начинается новый день! ⏰"
             
@@ -1241,17 +898,7 @@ async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tamagochi.discipline = min(100, tamagochi.discipline + 5)
             tamagochi.career_points += 3
             tamagochi.daily_stats["studied"] += 1
-            
-            # Если учились 4 раза подряд - нужен отдых
-            if tamagochi.consecutive_study >= 4:
-                tamagochi.start_rest(1)
-                result_text = f"📚 Вы позанимались с {tamagochi.name}! Интеллект повышен 🧠\n\n{tamagochi.name} переутомился{'ась' if tamagochi.gender == Gender.GIRL else ''} и теперь отдыхает 1 час."
-            else:
-                result_text = f"📚 Вы позанимались с {tamagochi.name}! Интеллект повышен 🧠"
-                
-            # Кулдаун на учебу: 30 минут
-            tamagochi.study_cooldown = datetime.datetime.now() + datetime.timedelta(minutes=30)
-            cooldown_added = True
+            result_text = f"📚 Вы позанимались с {tamagochi.name}! Интеллект повышен 🧠"
     
     elif action == "play":
         if tamagochi.energy < 15:
@@ -1262,11 +909,6 @@ async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tamagochi.social = min(100, tamagochi.social + 5)
             tamagochi.daily_stats["entertainment"] += 1
             result_text = f"🎮 Вы поиграли с {tamagochi.name}! Настроение улучшено 😊"
-            
-            # Если играли 3 раза подряд - нужен отдых
-            if tamagochi.consecutive_play >= 3:
-                tamagochi.start_rest(1)
-                result_text += f"\n\n{tamagochi.name} устал{'а' if tamagochi.gender == Gender.GIRL else ''} от игр и теперь отдыхает 1 час."
             
     elif action == "create":
         tamagochi.creativity = min(100, tamagochi.creativity + 10)
@@ -1283,9 +925,9 @@ async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await care_menu(update, context)
 
 async def random_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "/event"):
+        return
     
     user_id = update.effective_user.id
     
@@ -1320,7 +962,7 @@ async def random_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result_text += f"👥 Общительность: {'+' if effect_value > 0 else ''}{effect_value}\n"
     elif effect_type == "reputation":
         tamagochi.reputation = max(0, min(100, tamagochi.reputation + effect_value))
-        result_text += f"⭐ Репутация: {'+' if effect_value > 0 else ''}{effect_value}\n"
+        result_text += f"⭐ Репутация: {'+' if effect_type == 'reputation' and effect_value > 0 else ''}{effect_value}\n"
     elif effect_type == "creativity":
         tamagochi.creativity = max(0, min(100, tamagochi.creativity + effect_value))
         result_text += f"🎨 Творчество: {'+' if effect_value > 0 else ''}{effect_value}\n"
@@ -1337,10 +979,6 @@ async def random_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Обновляем настроение
     tamagochi.update_mood()
-    
-    # Обновляем турнирную таблицу
-    tournament.update_player(user_id, tamagochi, user_names.get(user_id, "Игрок"))
-    
     save_data()
     
     keyboard = [
@@ -1357,9 +995,9 @@ async def random_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "/destiny"):
+        return
     
     user_id = update.effective_user.id
     
@@ -1497,22 +1135,23 @@ async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "/help"):
+        return
     
     help_text = """
 🎮 *БОТ-ТАМАГОЧИ "ВИРТУАЛЬНЫЙ РЕБЕНОК"*
 
-🤖 *УПРАВЛЕНИЕ ГЛОБАЛЬНЫМ СНОМ БОТА:*
-/sleepbot [часы] - Усыпить бота на время (по умолчанию 8 часов)
-/wakeup - Разбудить бота досрочно
-/sleepstatus - Проверить статус сна бота
+🤖 *УПРАВЛЕНИЕ СОСТОЯНИЕМ БОТА:*
+/sleep - Уложить бота спать (перестанет отвечать)
+/wakeup - Разбудить бота
+/status_bot - Проверить состояние бота
 
-👶 *ОСНОВНЫЕ КОМАНДЫ:*
+👶 *ОСНОВНЫЕ КОМАНДЫ ИГРЫ:*
 /start - Создать нового ребенка
 /status - Показать состояние ребенка
 /daily - Прожить день (утро-вечер)
+/care - Уход за ребенком
 /event - Случайное жизненное событие
 /destiny - Проверить судьбу
 /help - Эта справка
@@ -1571,38 +1210,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
-async def handle_bot_control(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик кнопок управления сном бота"""
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
-    
-    query = update.callback_query
-    await query.answer()
-    
-    action = query.data
-    
-    if action == "bot_sleep_8":
-        # Эмулируем команду /sleepbot 8
-        context.args = ["8"]
-        await sleep_bot_command(update, context)
-    elif action == "bot_sleep_4":
-        context.args = ["4"]
-        await sleep_bot_command(update, context)
-    elif action == "bot_sleep_1":
-        context.args = ["1"]
-        await sleep_bot_command(update, context)
-    elif action == "bot_wakeup":
-        await wakeup_bot_command(update, context)
-    elif action == "bot_sleep_status":
-        await check_sleep_status_command(update, context)
-    
-    await bot_control_menu(update, context)
-
 async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот глобально
-    if is_bot_sleeping():
-        return  # Игнорируем команду полностью
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "handle_main_menu"):
+        return
     
     query = update.callback_query
     await query.answer()
@@ -1621,13 +1232,6 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await check_destiny(update, context)
     elif action == "menu":
         await show_main_menu(update, context)
-    elif action == "rest":
-        await care_menu(update, context)
-    elif action == "tournament":
-        # Здесь можно добавить функцию турнирной таблицы
-        await update.message.reply_text("🏆 Турнирная таблица в разработке...")
-    elif action == "bot_control":
-        await bot_control_menu(update, context)
     elif action == "reset_day":
         user_id = query.from_user.id
         if user_id in user_tamagochi:
@@ -1648,34 +1252,18 @@ def main():
     # Создание приложения
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # ========== ДОБАВЛЯЕМ ФИЛЬТР ГЛОБАЛЬНОГО СНА ==========
-    sleep_filter = SleepFilter()
+    # Обработчики команд (сначала команды управления сном)
+    application.add_handler(CommandHandler("sleep", sleep_command))
+    application.add_handler(CommandHandler("wakeup", wakeup_command))
+    application.add_handler(CommandHandler("status_bot", status_bot_command))
     
-    # Создаем обертку для всех обработчиков
-    async def filtered_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Проверяем глобальный сон
-        if await sleep_filter(update, context):
-            # Бот не спит, пропускаем дальше
-            return True
-        # Бот спит, останавливаем обработку
-        return False
-    
-    # Применяем фильтр ко ВСЕМ обновлениям
-    application.add_handler(TypeHandler(Update, filtered_handler), group=-1)
-    # =======================================================
-    
-    # Обработчики команд
+    # Обработчики команд игры
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", show_status))
     application.add_handler(CommandHandler("daily", daily_routine))
     application.add_handler(CommandHandler("event", random_event))
     application.add_handler(CommandHandler("destiny", check_destiny))
-    
-    # Команды управления сном бота
-    application.add_handler(CommandHandler("sleepbot", sleep_bot_command))
-    application.add_handler(CommandHandler("wakeup", wakeup_bot_command))
-    application.add_handler(CommandHandler("sleepstatus", check_sleep_status_command))
     
     # Обработчики сообщений для установки имени
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_name))
@@ -1684,7 +1272,6 @@ def main():
     application.add_handler(CallbackQueryHandler(set_gender, pattern="^gender_"))
     application.add_handler(CallbackQueryHandler(handle_main_menu, pattern="^action_"))
     application.add_handler(CallbackQueryHandler(handle_care, pattern="^care_"))
-    application.add_handler(CallbackQueryHandler(handle_bot_control, pattern="^bot_"))
     
     # Сохранение данных при завершении
     import atexit
@@ -1692,9 +1279,10 @@ def main():
     
     # Запуск бота
     print("🎮 Бот Тамагочи 'Виртуальный ребенок' запущен!")
-    print("🤖 Добавлен режим глобального сна: /sleepbot, /wakeup, /sleepstatus")
-    print("🔐 Используется безопасное хранение токена через .env файл")
-    print("🚀 Нажми Ctrl+C для остановки")
+    print("🤖 Режим сна бота: АКТИВИРОВАН")
+    print("💤 Команда /sleep - уложить бота спать")
+    print("☀️ Команда /wakeup - разбудить бота")
+    print("🚀 Нажмите Ctrl+C для остановки")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
