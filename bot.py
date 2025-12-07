@@ -1625,7 +1625,7 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await care_menu(update, context)
     elif action == "tournament":
         # Здесь можно добавить функцию турнирной таблицы
-        await update.message.reply_text("🏆 Турнирная таблица в разработке...")
+        await show_tournament (update, context)
     elif action == "bot_control":
         await bot_control_menu(update, context)
     elif action == "reset_day":
@@ -1700,4 +1700,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
