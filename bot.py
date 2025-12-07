@@ -1,6 +1,3 @@
-Полный обновлённый код бота с командой глобального сна
-
-```python
 import logging
 import random
 import json
@@ -1646,3 +1643,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
