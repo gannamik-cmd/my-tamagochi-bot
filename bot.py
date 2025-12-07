@@ -1,11 +1,10 @@
-
 import logging
 import random
 import json
 import datetime
 import os
 from enum import Enum
-from typing import Dict
+from typing import Dict, List
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, 
@@ -16,19 +15,15 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler
 )
-
-# Загружаем токен из .env файла
 from dotenv import load_dotenv
+
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
 if not TELEGRAM_TOKEN:
     print("❌ ОШИБКА: Токен бота не найден!")
-    print("Создайте файл .env в папке с ботом и добавьте:")
-    print("TELEGRAM_BOT_TOKEN=ваш_токен_здесь")
     exit(1)
 
-# Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -114,48 +109,24 @@ class EventGenerator:
     
     @staticmethod
     def get_life_event(name: str, gender: Gender) -> tuple:
-        """Возвращает (текст_события, эффект_характеристики, значение, эффект_очков, значение)"""
         events = [
-            (
-                f"{name} нашёл{'ла' if gender == Gender.GIRL else ''} на улице кошелек и сдал{'а' if gender == Gender.GIRL else ''} его в полицию",
-                "reputation", 15, "money", 10
-            ),
-            (
-                f"{name} помог{'ла' if gender == Gender.GIRL else ''} пожилому человеку донести сумки",
-                "social", 10, "reputation", 10
-            ),
-            (
-                f"{name} выиграл{'а' if gender == Gender.GIRL else ''} школьную олимпиаду",
-                "intelligence", 10, "career", 20
-            ),
-            (
-                f"{name} получил{'а' if gender == Gender.GIRL else ''} стипендию за хорошую учебу",
-                "money", 50, "discipline", 10
-            ),
-            (
-                f"{name} подрался{'ась' if gender == Gender.GIRL else ''} с одноклассником",
-                "health", -15, "criminal", 10
-            ),
-            (
-                f"{name} прогулял{'а' if gender == Gender.GIRL else ''} все уроки",
-                "discipline", -10, "criminal", 15
-            ),
-            (
-                f"{name} организовал{'а' if gender == Gender.GIRL else ''} вечеринку для друзей",
-                "social", 15, "happiness", 20
-            ),
-            (
-                f"{name} начал{'а' if gender == Gender.GIRL else ''} вести блог о своих увлечениях",
-                "creativity", 10, "social", 10
-            )
+            (f"{name} нашёл{'ла' if gender == Gender.GIRL else ''} на улице кошелек и сдал{'а' if gender == Gender.GIRL else ''} его в полицию", "reputation", 15, "money", 10),
+            (f"{name} помог{'ла' if gender == Gender.GIRL else ''} пожилому человеку донести сумки", "social", 10, "reputation", 10),
+            (f"{name} выиграл{'а' if gender == Gender.GIRL else ''} школьную олимпиаду", "intelligence", 10, "career", 20),
+            (f"{name} получил{'а' if gender == Gender.GIRL else ''} стипендию за хорошую учебу", "money", 50, "discipline", 10),
+            (f"{name} подрался{'ась' if gender == Gender.GIRL else ''} с одноклассником", "health", -15, "criminal", 10),
+            (f"{name} прогулял{'а' if gender == Gender.GIRL else ''} все уроки", "discipline", -10, "criminal", 15),
+            (f"{name} организовал{'а' if gender == Gender.GIRL else ''} вечеринку для друзей", "social", 15, "happiness", 20),
+            (f"{name} начал{'а' if gender == Gender.GIRL else ''} вести блог о своих увлечениях", "creativity", 10, "social", 10)
         ]
         return random.choice(events)
 
 # Класс Тамагочи
 class Tamagochi:
-    def __init__(self, name: str, gender: Gender):
+    def __init__(self, name: str, gender: Gender, owner_id: int):
         self.name = name
         self.gender = gender
+        self.owner_id = owner_id
         self.age_days = 0
         self.age_group = AgeGroup.BABY
         
@@ -195,6 +166,7 @@ class Tamagochi:
         }
         self.career_points = 0
         self.criminal_points = 0
+        self.rating_points = 0  # Очки для турнирной таблицы
         self.inventory = []
         self.friends = []
         self.relationships = {}
@@ -251,7 +223,6 @@ class Tamagochi:
             self.mood = Mood.ANGRY
     
     def natural_changes(self):
-        # Естественные изменения характеристик
         self.hunger += random.randint(1, 3)
         self.hygiene -= random.randint(1, 5)
         self.energy -= random.randint(1, 4)
@@ -270,16 +241,13 @@ class Tamagochi:
         if self.energy < 30:
             self.health -= 1
             
-        # Шанс заболеть
         if random.random() < 0.1 and self.hygiene < 40:
             self.is_sick = True
             self.health -= 10
             
-        # Шанс улучшения настроения от хороших условий
         if self.hunger < 20 and self.hygiene > 80 and self.energy > 70:
             self.happiness += random.randint(1, 3)
             
-        # Ограничения значений
         self.health = max(0, min(100, self.health))
         self.hunger = max(0, min(100, self.hunger))
         self.hygiene = max(0, min(100, self.hygiene))
@@ -288,10 +256,23 @@ class Tamagochi:
         
         self.update_mood()
     
+    def update_rating(self):
+        """Обновление рейтинговых очков для турнирной таблицы"""
+        self.rating_points = (
+            self.career_points * 2 +
+            self.intelligence * 3 +
+            self.discipline * 2 +
+            self.social * 1 +
+            self.creativity * 1 -
+            self.criminal_points * 5
+        )
+        return self.rating_points
+    
     def to_dict(self):
         return {
             "name": self.name,
             "gender": self.gender.value,
+            "owner_id": self.owner_id,
             "age_days": self.age_days,
             "age_group": self.age_group.value,
             "health": self.health,
@@ -311,6 +292,7 @@ class Tamagochi:
             "skills": self.skills,
             "career_points": self.career_points,
             "criminal_points": self.criminal_points,
+            "rating_points": self.rating_points,
             "inventory": self.inventory,
             "friends": self.friends
         }
@@ -318,7 +300,8 @@ class Tamagochi:
     @classmethod
     def from_dict(cls, data: dict):
         gender = Gender(data["gender"])
-        tamagochi = cls(data["name"], gender)
+        owner_id = data.get("owner_id", 0)
+        tamagochi = cls(data["name"], gender, owner_id)
         
         tamagochi.age_days = data["age_days"]
         tamagochi.age_group = AgeGroup(data["age_group"])
@@ -344,33 +327,108 @@ class Tamagochi:
         tamagochi.skills = data["skills"]
         tamagochi.career_points = data["career_points"]
         tamagochi.criminal_points = data["criminal_points"]
+        tamagochi.rating_points = data.get("rating_points", 0)
         tamagochi.inventory = data["inventory"]
         tamagochi.friends = data["friends"]
         
         return tamagochi
 
+# Турнирная система
+class Tournament:
+    def __init__(self):
+        self.leaderboard = {}  # {user_id: {"name": имя_ребенка, "rating": очки, "owner_name": имя_владельца}}
+        self.last_updated = datetime.datetime.now()
+    
+    def update_player(self, user_id: int, tamagochi: Tamagochi, owner_name: str):
+        rating = tamagochi.update_rating()
+        self.leaderboard[user_id] = {
+            "name": tamagochi.name,
+            "rating": rating,
+            "owner_name": owner_name,
+            "age": tamagochi.age_days // 365,
+            "career": tamagochi.career_points,
+            "criminal": tamagochi.criminal_points
+        }
+        self.last_updated = datetime.datetime.now()
+    
+    def get_leaderboard(self, limit: int = 10) -> List[dict]:
+        """Возвращает отсортированный список лидеров"""
+        sorted_players = sorted(
+            self.leaderboard.items(),
+            key=lambda x: x[1]["rating"],
+            reverse=True
+        )
+        return [(user_id, data) for user_id, data in sorted_players[:limit]]
+    
+    def get_player_position(self, user_id: int) -> int:
+        """Возвращает позицию игрока в турнирной таблице (1-based)"""
+        if user_id not in self.leaderboard:
+            return 0
+        
+        sorted_players = sorted(
+            self.leaderboard.items(),
+            key=lambda x: x[1]["rating"],
+            reverse=True
+        )
+        
+        for i, (uid, _) in enumerate(sorted_players, 1):
+            if uid == user_id:
+                return i
+        return 0
+    
+    def to_dict(self):
+        return {
+            "leaderboard": self.leaderboard,
+            "last_updated": self.last_updated.isoformat()
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict):
+        tournament = cls()
+        tournament.leaderboard = data.get("leaderboard", {})
+        if data.get("last_updated"):
+            tournament.last_updated = datetime.datetime.fromisoformat(data["last_updated"])
+        return tournament
+
 # Глобальное хранилище данных
 user_tamagochi = {}
+user_names = {}  # Храним имена пользователей для турнирной таблицы
+tournament = Tournament()
 user_save_file = "tamagochi_data.json"
+tournament_save_file = "tournament_data.json"
 
 def load_data():
-    global user_tamagochi
+    global user_tamagochi, tournament
     try:
         with open(user_save_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
             for user_id, tam_data in data.items():
                 user_tamagochi[int(user_id)] = Tamagochi.from_dict(tam_data)
-        logger.info("Данные загружены")
+        logger.info("Данные тамагочи загружены")
     except FileNotFoundError:
-        logger.info("Файл данных не найден, создаем новый")
+        logger.info("Файл данных тамагочи не найден, создаем новый")
+    
+    try:
+        with open(tournament_save_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            tournament = Tournament.from_dict(data)
+        logger.info("Данные турнира загружены")
+    except FileNotFoundError:
+        logger.info("Файл турнира не найден, создаем новый")
 
 def save_data():
+    # Сохраняем тамагочи
     data = {}
     for user_id, tamagochi in user_tamagochi.items():
         data[str(user_id)] = tamagochi.to_dict()
     
     with open(user_save_file, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    
+    # Сохраняем турнир
+    with open(tournament_save_file, 'w', encoding='utf-8') as f:
+        json.dump(tournament.to_dict(), f, ensure_ascii=False, indent=2)
+    
     logger.info("Данные сохранены")
 
 # ====== ФУНКЦИЯ ДЛЯ ПРОВЕРКИ СНА БОТА ======
@@ -449,6 +507,113 @@ async def status_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"/status_bot - проверить состояние"
     )
 
+# ====== ТУРНИРНЫЕ КОМАНДЫ ======
+async def tournament_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает турнирную таблицу"""
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "/tournament"):
+        return
+    
+    user_id = update.effective_user.id
+    
+    # Получаем топ-10 игроков
+    leaderboard = tournament.get_leaderboard(10)
+    
+    if not leaderboard:
+        await update.message.reply_text("🏆 Турнирная таблица пуста!\nСоздайте ребенка и начните играть!")
+        return
+    
+    # Формируем таблицу
+    table_text = "🏆 *ТУРНИРНАЯ ТАБЛИЦА*\n\n"
+    table_text += "Место | Ребенок | Владелец | Очки\n"
+    table_text += "─" * 50 + "\n"
+    
+    for i, (uid, data) in enumerate(leaderboard, 1):
+        medal = ""
+        if i == 1: medal = "🥇 "
+        elif i == 2: medal = "🥈 "
+        elif i == 3: medal = "🥉 "
+        
+        table_text += f"{medal}{i}. {data['name']} | {data['owner_name']} | {data['rating']} очков\n"
+    
+    # Добавляем информацию о текущем игроке
+    position = tournament.get_player_position(user_id)
+    if position > 0:
+        table_text += f"\n📊 *Ваша позиция:* #{position}"
+        if user_id in tournament.leaderboard:
+            table_text += f"\n👤 Ваш ребенок: {tournament.leaderboard[user_id]['name']}"
+            table_text += f"\n🏆 Ваши очки: {tournament.leaderboard[user_id]['rating']}"
+    else:
+        table_text += "\n📊 Вы еще не в турнирной таблице. Создайте ребенка!"
+    
+    table_text += f"\n\n🔄 Обновлено: {tournament.last_updated.strftime('%d.%m.%Y %H:%M')}"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 Обновить", callback_data="action_tournament"),
+         InlineKeyboardButton("📊 Мой рейтинг", callback_data="action_rating")],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        table_text,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def rating_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает рейтинг текущего игрока"""
+    # Проверяем, не спит ли бот
+    if not await check_bot_sleep(update, context, "/rating"):
+        return
+    
+    user_id = update.effective_user.id
+    
+    if user_id not in user_tamagochi:
+        await update.message.reply_text("У вас еще нет ребенка! Используйте /start для создания.")
+        return
+    
+    tamagochi = user_tamagochi[user_id]
+    position = tournament.get_player_position(user_id)
+    rating = tamagochi.update_rating()
+    
+    rating_text = f"""
+📊 *ВАШ РЕЙТИНГ*
+
+👤 *Ребенок:* {tamagochi.name}
+👑 *Владелец:* {user_names.get(user_id, 'Игрок')}
+🏆 *Турнирные очки:* {rating}
+🏅 *Место в таблице:* #{position if position > 0 else 'не в таблице'}
+
+📈 *КОМПОНЕНТЫ РЕЙТИНГА:*
+• 🚀 Карьерные очки: {tamagochi.career_points} × 2 = {tamagochi.career_points * 2}
+• 🧠 Интеллект: {tamagochi.intelligence} × 3 = {tamagochi.intelligence * 3}
+• ⚖️ Дисциплина: {tamagochi.discipline} × 2 = {tamagochi.discipline * 2}
+• 👥 Социальные: {tamagochi.social} × 1 = {tamagochi.social}
+• 🎨 Творчество: {tamagochi.creativity} × 1 = {tamagochi.creativity}
+• ⚠️ Криминал: {tamagochi.criminal_points} × -5 = -{tamagochi.criminal_points * 5}
+
+💡 *КАК ПОВЫСИТЬ РЕЙТИНГ:*
+1. Учитесь (/daily, /care study) - повышает интеллект
+2. Получайте карьерные очки (хорошая учеба, события)
+3. Следите за дисциплиной
+4. Избегайте криминальных очков (не прогуливайте школу)
+"""
+    
+    keyboard = [
+        [InlineKeyboardButton("🏆 Турнирная таблица", callback_data="action_tournament"),
+         InlineKeyboardButton("📊 Статус ребенка", callback_data="action_status")],
+        [InlineKeyboardButton("🌅 Улучшить рейтинг", callback_data="action_daily"),
+         InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        rating_text,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
 # ====== ОБНОВЛЁННЫЕ КОМАНДЫ БОТА С ПРОВЕРКОЙ СНА ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем, не спит ли бот
@@ -456,6 +621,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_id = update.effective_user.id
+    user_name = update.effective_user.first_name or "Игрок"
+    user_names[user_id] = user_name
     
     if user_id in user_tamagochi:
         await show_status(update, context)
@@ -468,9 +635,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "👋 Добро пожаловать в игру 'Виртуальный ребенок'!\n\n"
+        f"👋 Привет, {user_name}! Добро пожаловать в игру 'Виртуальный ребенок'!\n\n"
         "Вы становитесь родителем ребенка, который будет расти и развиваться.\n"
-        "Ваши решения повлияют на его будущее!\n\n"
+        "Теперь доступны соревнования с другими игроками! 🏆\n\n"
         "К 13 годам ребенок может:\n"
         "✅ Разбогатеть и стать успешным\n"
         "❌ Попасть в тюрьму из-за плохого воспитания\n\n"
@@ -502,25 +669,32 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = update.effective_user.id
     name = update.message.text.strip()
+    user_name = user_names.get(user_id, "Игрок")
     
     if not name or len(name) > 20:
         await update.message.reply_text("Имя должно быть от 1 до 20 символов. Попробуйте еще раз:")
         return
     
     gender = context.user_data.get('gender', Gender.BOY)
-    tamagochi = Tamagochi(name, gender)
+    tamagochi = Tamagochi(name, gender, user_id)
     user_tamagochi[user_id] = tamagochi
+    
+    # Добавляем в турнирную таблицу
+    tournament.update_player(user_id, tamagochi, user_name)
     
     save_data()
     
     await update.message.reply_text(
-        f"🎉 Поздравляем! У вас родился{'ся' if gender == Gender.BOY else 'ась'} {name}!\n\n"
-        f"Теперь вы можете ухаживать за своим ребенком.\n\n"
-        f"Новые команды управления ботом:\n"
+        f"🎉 Поздравляем, {user_name}! У вас родился{'ся' if gender == Gender.BOY else 'ась'} {name}!\n\n"
+        f"Теперь вы можете ухаживать за своим ребенком и соревноваться с другими!\n\n"
+        f"🏆 *Новые турнирные команды:*\n"
+        f"/tournament - турнирная таблица\n"
+        f"/rating - ваш рейтинг\n\n"
+        f"🤖 *Управление ботом:*\n"
         f"/sleep - уложить бота спать\n"
         f"/wakeup - разбудить бота\n"
         f"/status_bot - состояние бота\n\n"
-        f"Основные команды игры:\n"
+        f"🎮 *Основные команды игры:*\n"
         f"/status - состояние ребенка\n"
         f"/daily - ежедневная рутина\n"
         f"/care - уход за ребенком\n"
@@ -540,21 +714,23 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 Статус", callback_data="action_status")],
         [InlineKeyboardButton("🌅 День ребенка", callback_data="action_daily")],
         [InlineKeyboardButton("👶 Уход", callback_data="action_care")],
-        [InlineKeyboardButton("🎭 Событие", callback_data="action_event")],
-        [InlineKeyboardButton("🔮 Судьба", callback_data="action_destiny")],
-        [InlineKeyboardButton("🔄 Сбросить день", callback_data="action_reset_day")]
+        [InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
+        [InlineKeyboardButton("📈 Рейтинг", callback_data="action_rating")],
+        [InlineKeyboardButton("🔮 Судьба", callback_data="action_destiny")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if update.callback_query:
         await update.callback_query.message.reply_text(
-            "Главное меню:",
-            reply_markup=reply_markup
+            "🏆 *Главное меню с турниром:*",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
         )
     else:
         await update.message.reply_text(
-            "Главное меню:",
-            reply_markup=reply_markup
+            "🏆 *Главное меню с турниром:*",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
         )
 
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -570,6 +746,9 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     tamagochi = user_tamagochi[user_id]
     
+    # Обновляем естественные изменения
+    tamagochi.natural_changes()
+    
     age_years = tamagochi.age_days // 365
     age_months = (tamagochi.age_days % 365) // 30
     
@@ -578,13 +757,19 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filled = int(value / max_value * 10)
         return "█" * filled + "░" * (10 - filled)
     
+    # Получаем позицию в турнире
+    position = tournament.get_player_position(user_id)
+    rating = tamagochi.update_rating()
+    
     # Показываем состояние бота в статусе
     global BOT_IS_SLEEPING
     bot_status = "💤 Спит" if BOT_IS_SLEEPING else "☀️ Бодрствует"
     
     status_text = f"""
 👤 *{tamagochi.name}* ({tamagochi.gender.value})
-🤖 *Состояние бота:* {bot_status}
+👑 Владелец: {user_names.get(user_id, 'Игрок')}
+🤖 Состояние бота: {bot_status}
+🏆 Рейтинг: {rating} очков (Место #{position if position > 0 else 'не в таблице'})
 
 🎂 *Возраст:* {age_years} лет, {age_months} месяцев ({tamagochi.age_days} дней)
 📊 *Группа:* {tamagochi.age_group.value}
@@ -617,19 +802,14 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎯 *ЖИЗНЕННЫЙ ПУТЬ:*
 • 🚀 Карьерные очки: {tamagochi.career_points}
 • ⚠️ Криминальные очки: {tamagochi.criminal_points}
-
-📊 *СЕГОДНЯ:*
-• 🏫 Уроков: {tamagochi.daily_stats['lessons_attended']}
-• 🍽️ Приемов пищи: {tamagochi.daily_stats['meals_eaten']}
-• 📖 Учебы: {tamagochi.daily_stats['studied']}
-• 🎮 Развлечений: {tamagochi.daily_stats['entertainment']}
-    """
+• 🏆 Турнирные очки: {rating}
+"""
     
     keyboard = [
         [InlineKeyboardButton("🔄 Обновить", callback_data="action_status"),
-         InlineKeyboardButton("🌅 День ребенка", callback_data="action_daily")],
-        [InlineKeyboardButton("👶 Уход", callback_data="action_care"),
-         InlineKeyboardButton("🎭 Событие", callback_data="action_event")],
+         InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
+        [InlineKeyboardButton("🌅 Улучшить рейтинг", callback_data="action_daily"),
+         InlineKeyboardButton("📈 Мой рейтинг", callback_data="action_rating")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -646,6 +826,11 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+    
+    # Обновляем турнирную таблицу
+    if user_id in user_names:
+        tournament.update_player(user_id, tamagochi, user_names[user_id])
+        save_data()
 
 async def daily_routine(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем, не спит ли бот
@@ -764,6 +949,9 @@ async def daily_routine(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tamagochi.health = min(100, tamagochi.health + 8)
     events.append(f"🌙 *Сон:* {tamagochi.name} лег{'ла' if tamagochi.gender == Gender.GIRL else ''} спать")
     
+    # Обновляем турнирную таблицу
+    tournament.update_player(user_id, tamagochi, user_names.get(user_id, "Игрок"))
+    
     # Сохранение
     save_data()
     
@@ -772,14 +960,26 @@ async def daily_routine(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, event in enumerate(events, 1):
         routine_text += f"{i}. {event}\n"
     
+    # Показываем изменение рейтинга
+    old_rating = tamagochi.rating_points
+    new_rating = tamagochi.update_rating()
+    rating_change = new_rating - old_rating
+    
     routine_text += f"\n*Итоги дня:*\n"
     routine_text += f"• 🏫 Уроков посещено: {tamagochi.daily_stats['lessons_attended']}\n"
     routine_text += f"• 🍽️ Приемов пищи: {tamagochi.daily_stats['meals_eaten']}\n"
     routine_text += f"• 🎯 Карьерных очков: +{tamagochi.daily_stats['lessons_attended'] * 3}\n"
+    routine_text += f"• 🏆 Рейтинг: {new_rating} очков "
+    if rating_change > 0:
+        routine_text += f"(+{rating_change} 📈)"
+    elif rating_change < 0:
+        routine_text += f"({rating_change} 📉)"
+    else:
+        routine_text += "(без изменений)"
     
     keyboard = [
         [InlineKeyboardButton("📊 Статус", callback_data="action_status"),
-         InlineKeyboardButton("🎭 Событие", callback_data="action_event")],
+         InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -916,8 +1116,14 @@ async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tamagochi.happiness = min(100, tamagochi.happiness + 15)
         result_text = f"🎨 {tamagochi.name} занял{'ась' if tamagochi.gender == Gender.GIRL else ''}ся творчеством! 🖌️"
     
-    # Обновляем настроение и сохраняем
+    # Обновляем настроение, рейтинг и сохраняем
     tamagochi.update_mood()
+    tamagochi.update_rating()
+    
+    # Обновляем турнирную таблицу
+    if user_id in user_names:
+        tournament.update_player(user_id, tamagochi, user_names[user_id])
+    
     save_data()
     
     # Показываем результат и возвращаем в меню ухода
@@ -977,13 +1183,19 @@ async def random_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tamagochi.happiness = max(0, min(100, tamagochi.happiness + points_value))
         result_text += f"😊 Счастье: {'+' if points_value > 0 else ''}{points_value}\n"
     
-    # Обновляем настроение
+    # Обновляем настроение и рейтинг
     tamagochi.update_mood()
+    tamagochi.update_rating()
+    
+    # Обновляем турнирную таблицу
+    if user_id in user_names:
+        tournament.update_player(user_id, tamagochi, user_names[user_id])
+    
     save_data()
     
     keyboard = [
         [InlineKeyboardButton("📊 Статус", callback_data="action_status"),
-         InlineKeyboardButton("🎭 Еще событие", callback_data="action_event")],
+         InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1008,24 +1220,13 @@ async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tamagochi = user_tamagochi[user_id]
     age_years = tamagochi.age_days // 365
     
+    # Обновляем рейтинг перед проверкой судьбы
+    rating = tamagochi.update_rating()
+    position = tournament.get_player_position(user_id)
+    
     if age_years < 13:
         years_left = 13 - age_years
         days_left = years_left * 365
-        
-        # Прогноз судьбы
-        career_ratio = tamagochi.career_points / max(1, tamagochi.age_days)
-        criminal_ratio = tamagochi.criminal_points / max(1, tamagochi.age_days)
-        
-        if criminal_ratio > 0.5:
-            prediction = "⚠️ *Тревожный прогноз:* Ребенок движется к проблемам с законом!"
-        elif career_ratio > 0.8:
-            prediction = "⭐ *Отличный прогноз:* Ребенок на пути к успешной карьере!"
-        elif tamagochi.intelligence > 80:
-            prediction = "🎓 *Умный ребенок:* Хорошие шансы на получение образования!"
-        elif tamagochi.discipline < 30:
-            prediction = "😟 *Слабый прогноз:* Нужно больше дисциплины!"
-        else:
-            prediction = "👤 *Обычная жизнь:* Пока все идет своим чередом."
         
         destiny_text = f"""
 🔮 *ПРОВЕРКА СУДЬБЫ {tamagochi.name.upper()}:*
@@ -1039,17 +1240,19 @@ async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 🧠 Интеллект: {tamagochi.intelligence}
 • ⚖️ Дисциплина: {tamagochi.discipline}
 • 💰 Деньги: {tamagochi.money} руб.
+• 🏆 Турнирные очки: {rating} (Место #{position if position > 0 else 'не в таблице'})
 
-📈 *ПРОГНОЗ:* 
-{prediction}
-
-💡 *СОВЕТЫ:*
+💡 *СОВЕТЫ ДЛЯ УСПЕХА:*
 {'- Уделяйте больше внимания учебе!' if tamagochi.career_points < 50 else '- Продолжайте в том же духе!'}
 {'- Контролируйте поведение ребенка!' if tamagochi.criminal_points > 30 else '- Поведение в норме.'}
 {'- Развивайте социальные навыки!' if tamagochi.social < 40 else '- Социальные навыки хорошие.'}
+{'- Участвуйте в турнире!' if position == 0 else f'- Ваше место в турнире: #{position}'}
 """
     else:
         # Определение финальной судьбы в 13 лет
+        rating = tamagochi.update_rating()
+        position = tournament.get_player_position(user_id)
+        
         if tamagochi.career_points > 150 and tamagochi.criminal_points < 30:
             destiny = f"""
 🎉 *ПОБЕДА! {tamagochi.name} РАЗБОГАТЕЛ{' ' if tamagochi.gender == Gender.BOY else 'А'}!*
@@ -1059,6 +1262,7 @@ async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🏆 *Достижения:* Основал{'а' if tamagochi.gender == Gender.GIRL else ''} свою IT-компанию
 ⭐ *Будущее:* Яркая карьера и признание!
 
+*Турнирный результат:* {rating} очков (Место #{position if position > 0 else 'не в таблице'})
 *Ваш результат:* Идеальный родитель! 👑
 """
         elif tamagochi.criminal_points > 100:
@@ -1070,6 +1274,7 @@ async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ⏳ *Срок:* {random.randint(2, 5)} года
 💔 *Родители:* Разочарованы и опечалены...
 
+*Турнирный результат:* {rating} очков (Место #{position if position > 0 else 'не в таблице'})
 *Ваш результат:* Провал в воспитании... 😢
 """
         elif tamagochi.health < 30:
@@ -1081,6 +1286,7 @@ async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💊 *Лечение:* Требуется постоянный медицинский уход
 📉 *Перспективы:* Ограниченные возможности
 
+*Турнирный результат:* {rating} очков (Место #{position if position > 0 else 'не в таблице'})
 *Ваш результат:* Нужно больше заботиться о здоровье ребенка! 🏥
 """
         elif tamagochi.intelligence > 120:
@@ -1092,6 +1298,7 @@ async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🏆 *Достижения:* Победитель международных олимпиад
 🎯 *Будущее:* Стипендия в Гарварде/Оксфорде
 
+*Турнирный результат:* {rating} очков (Место #{position if position > 0 else 'не в таблице'})
 *Ваш результат:* Вы воспитали гения! 🧬
 """
         else:
@@ -1103,6 +1310,7 @@ async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💼 *Работа:* {random.choice(['офисный сотрудник', 'продавец', 'водитель', 'учитель'])}
 🏠 *Жизнь:* Стабильная, но не выдающаяся
 
+*Турнирный результат:* {rating} очков (Место #{position if position > 0 else 'не в таблице'})
 *Ваш результат:* Средний родитель. Можно было лучше! ⚖️
 """
         
@@ -1119,11 +1327,12 @@ async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • ⭐ Репутация: {tamagochi.reputation}
 • 👥 Друзей: {len(tamagochi.friends)}
 • 🏆 Навыков: {sum(tamagochi.skills.values())} очков
+• 🏅 Турнирные очки: {rating}
 """
     
     keyboard = [
         [InlineKeyboardButton("📊 Статус", callback_data="action_status"),
-         InlineKeyboardButton("🌅 Продолжить", callback_data="action_daily")],
+         InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1147,6 +1356,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /wakeup - Разбудить бота
 /status_bot - Проверить состояние бота
 
+🏆 *ТУРНИРНЫЕ КОМАНДЫ:*
+/tournament - Турнирная таблица (топ-10 игроков)
+/rating - Ваш рейтинг и компоненты очков
+
 👶 *ОСНОВНЫЕ КОМАНДЫ ИГРЫ:*
 /start - Создать нового ребенка
 /status - Показать состояние ребенка
@@ -1158,15 +1371,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 👆 *ИЛИ ИСПОЛЬЗУЙТЕ КНОПКИ В МЕНЮ*
 
-👶 *УХОД ЗА РЕБЕНКОМ:*
-🍼 Кормить - Уменьшает голод, повышает здоровье
-🛁 Мыть - Увеличивает чистоту, лечит болезни
-💤 Усыпить - Восстанавливает энергию
-☀️ Разбудить - Начать новый день
-💊 Лечить - Вылечить болезни, стоит денег
-📚 Учить - Повышает интеллект и карьерные очки
-🎮 Играть - Повышает настроение и общительность
-🎨 Творить - Развивает творческие навыки
+🏆 *КАК РАБОТАЕТ ТУРНИР:*
+Рейтинг = (Карьера×2 + Интеллект×3 + Дисциплина×2 + Социальные×1 + Творчество×1 - Криминал×5)
+• Чем выше рейтинг - тем выше место в таблице
+• Турнир обновляется после каждого действия
+• Все игроки в одном чате соревнуются между собой
 
 📅 *ЕЖЕДНЕВНАЯ РУТИНА:*
 1. Пробуждение (с будильником или без)
@@ -1183,30 +1392,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎯 *ЦЕЛЬ ИГРЫ:*
 Воспитать ребенка к 13 годам так, чтобы он:
 ✅ *РАЗБОГАТЕЛ* (много карьерных очков)
+✅ *ЗАНЯЛ ВЫСОКОЕ МЕСТО В ТУРНИРЕ*
 ❌ *НЕ ПОПАЛ В ТЮРЬМУ* (мало криминальных очков)
 
-📊 *ВАЖНЫЕ ПОКАЗАТЕЛИ:*
-• ❤️ Здоровье - если упадет до 0, игра окончена
-• 😊 Счастье - влияет на настроение и события
-• ⚖️ Дисциплина - влияет на успехи в школе
-• 🧠 Интеллект - определяет будущие возможности
-• 👥 Общительность - помогает заводить друзей
-• ⭐ Репутация - влияет на случайные события
-
-💡 *СОВЕТЫ:*
-1. Следите за основными показателями (голод, чистота, энергия)
-2. Балансируйте учебу и отдых
-3. Развивайте разные навыки
-4. Участвуйте в случайных событиях
-5. Контролируйте дисциплину и поведение
-
-🎭 *СЛУЧАЙНЫЕ СОБЫТИЯ могут:*
-• Дать или отнять деньги
-• Повысить или понизить характеристики
-• Добавить карьерных или криминальных очков
-• Изменить репутацию
-
-*Удачи в воспитании вашего виртуального ребенка!* 👨‍👦👩‍👧
+*Удачи в воспитании и победы в турнире!* 👨‍👦👩‍👧🏆
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -1230,19 +1419,11 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await random_event(update, context)
     elif action == "destiny":
         await check_destiny(update, context)
+    elif action == "tournament":
+        await tournament_command(update, context)
+    elif action == "rating":
+        await rating_command(update, context)
     elif action == "menu":
-        await show_main_menu(update, context)
-    elif action == "reset_day":
-        user_id = query.from_user.id
-        if user_id in user_tamagochi:
-            user_tamagochi[user_id].daily_stats = {
-                "lessons_attended": 0,
-                "meals_eaten": 0,
-                "studied": 0,
-                "entertainment": 0
-            }
-            save_data()
-            await query.message.reply_text("📊 Дневная статистика сброшена!")
         await show_main_menu(update, context)
 
 def main():
@@ -1256,6 +1437,10 @@ def main():
     application.add_handler(CommandHandler("sleep", sleep_command))
     application.add_handler(CommandHandler("wakeup", wakeup_command))
     application.add_handler(CommandHandler("status_bot", status_bot_command))
+    
+    # Турнирные команды
+    application.add_handler(CommandHandler("tournament", tournament_command))
+    application.add_handler(CommandHandler("rating", rating_command))
     
     # Обработчики команд игры
     application.add_handler(CommandHandler("start", start))
@@ -1280,8 +1465,9 @@ def main():
     # Запуск бота
     print("🎮 Бот Тамагочи 'Виртуальный ребенок' запущен!")
     print("🤖 Режим сна бота: АКТИВИРОВАН")
+    print("🏆 Турнирная система: АКТИВИРОВАНА")
     print("💤 Команда /sleep - уложить бота спать")
-    print("☀️ Команда /wakeup - разбудить бота")
+    print("🏆 Команда /tournament - турнирная таблица")
     print("🚀 Нажмите Ctrl+C для остановки")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
