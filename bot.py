@@ -1,3 +1,8 @@
+Я добавлю в код систему глобального сна бота, где бот будет полностью игнорировать все сообщения, не отправляя никаких ответов, пока его не разбудят командой /wakeup.
+
+🔧 Полный обновлённый код с глобальным режимом сна:
+
+``
 import logging
 import random
 import json
@@ -14,7 +19,9 @@ from telegram.ext import (
     MessageHandler, 
     filters, 
     ContextTypes,
-    ConversationHandler
+    ConversationHandler,
+    MessageHandler,
+    TypeHandler
 )
 from dotenv import load_dotenv
 
@@ -28,9 +35,11 @@ if not TELEGRAM_TOKEN:
     print("TELEGRAM_BOT_TOKEN=ваш_токен_здесь")
     exit(1)
 
-# Глобальный режим сна бота
+# ========== ГЛОБАЛЬНЫЙ РЕЖИМ СНА БОТА ==========
 BOT_SLEEP_MODE = False
 BOT_SLEEP_UNTIL = None
+BOT_SLEEP_REASON = "автоматический сон"
+# ===============================================
 
 # Настройка логирования
 logging.basicConfig(
@@ -333,12 +342,6 @@ class Tamagochi:
             self.is_sleeping = False
             self.sleep_end_time = None
             self.energy = min(100, self.energy + 50)
-        
-        # Сброс кулдаунов
-        if self.meal_cooldown and now >= self.meal_cooldown:
-            self.meal_cooldown = None
-        if self.study_cooldown and now >= self.study_cooldown:
-            self.study_cooldown = None
     
     def start_rest(self, hours: int = 1):
         self.is_resting = True
@@ -557,66 +560,11 @@ tournament = Tournament()
 user_save_file = "tamagochi_data.json"
 tournament_save_file = "tournament_data.json"
 
-# Глобальные функции для сна бота
-async def check_bot_sleep_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Проверяет, спит ли бот. Возвращает True если нужно игнорировать сообщение"""
-    global BOT_SLEEP_MODE, BOT_SLEEP_UNTIL
-    
-    if not BOT_SLEEP_MODE:
-        return False
-    
-    now = datetime.datetime.now()
-    if BOT_SLEEP_UNTIL and now >= BOT_SLEEP_UNTIL:
-        # Время сна вышло
-        BOT_SLEEP_MODE = False
-        BOT_SLEEP_UNTIL = None
-        return False
-    
-    # Бот всё ещё спит
-    time_left = BOT_SLEEP_UNTIL - now
-    hours = int(time_left.total_seconds() // 3600)
-    minutes = int((time_left.total_seconds() % 3600) // 60)
-    
-    await update.message.reply_text(
-        f"🤖 Бот находится в режиме сна. "
-        f"Вернётся через {hours}ч {minutes}м. 💤\n"
-        f"Используйте /wakeup чтобы разбудить досрочно."
-    )
-    return True
-
-async def sleep_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для усыпления бота"""
-    global BOT_SLEEP_MODE, BOT_SLEEP_UNTIL
-    
-    try:
-        hours = int(context.args[0]) if context.args else 8
-    except ValueError:
-        hours = 8
-    
-    BOT_SLEEP_MODE = True
-    BOT_SLEEP_UNTIL = datetime.datetime.now() + datetime.timedelta(hours=hours)
-    
-    await update.message.reply_text(
-        f"🤖 Бот переходит в режим сна на {hours} часов. 💤\n"
-        f"Все команды будут игнорироваться до {BOT_SLEEP_UNTIL.strftime('%H:%M')}.\n"
-        f"Используйте /wakeup чтобы разбудить досрочно."
-    )
-
-async def wakeup_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для пробуждения бота"""
-    global BOT_SLEEP_MODE, BOT_SLEEP_UNTIL
-    
-    if not BOT_SLEEP_MODE:
-        await update.message.reply_text("🤖 Бот уже не спит! ☀️")
-        return
-    
-    BOT_SLEEP_MODE = False
-    BOT_SLEEP_UNTIL = None
-    
-    await update.message.reply_text(
-        "🤖 Бот проснулся и готов к работе! ☀️\n"
-        "Все команды снова активны!"
-    )
+# ========== ГЛОБАЛЬНЫЙ РЕЖИМ СНА БОТА ==========
+BOT_SLEEP_MODE = False
+BOT_SLEEP_UNTIL = None
+BOT_SLEEP_REASON = "автоматический сон"
+# ===============================================
 
 def load_data():
     global user_tamagochi, tournament
@@ -652,11 +600,113 @@ def save_data():
     
     logger.info("Данные сохранены")
 
+# ========== ФУНКЦИИ ГЛОБАЛЬНОГО СНА БОТА ==========
+def is_bot_sleeping() -> bool:
+    """Проверяет, спит ли бот (глобально)"""
+    global BOT_SLEEP_MODE, BOT_SLEEP_UNTIL
+    
+    if not BOT_SLEEP_MODE:
+        return False
+    
+    now = datetime.datetime.now()
+    if BOT_SLEEP_UNTIL and now >= BOT_SLEEP_UNTIL:
+        # Время сна вышло
+        BOT_SLEEP_MODE = False
+        BOT_SLEEP_UNTIL = None
+        logger.info("🤖 Бот автоматически проснулся от сна")
+        return False
+    
+    return True
+
+async def sleep_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для усыпления бота"""
+    global BOT_SLEEP_MODE, BOT_SLEEP_UNTIL, BOT_SLEEP_REASON
+    
+    if is_bot_sleeping():
+        # Бот уже спит, ничего не делаем
+        return
+    
+    try:
+        hours = int(context.args[0]) if context.args else 8
+    except ValueError:
+        hours = 8
+    
+    BOT_SLEEP_MODE = True
+    BOT_SLEEP_UNTIL = datetime.datetime.now() + datetime.timedelta(hours=hours)
+    BOT_SLEEP_REASON = f"команда от пользователя {update.effective_user.id}"
+    
+    await update.message.reply_text(
+        f"🤖 Бот переходит в режим полного сна на {hours} часов. 💤\n\n"
+        f"⏰ Проснется в: {BOT_SLEEP_UNTIL.strftime('%H:%M (%d.%m)')}\n"
+        f"📅 До пробуждения: {BOT_SLEEP_UNTIL - datetime.datetime.now()}\n\n"
+        f"⚠️ В режиме сна бот:\n"
+        f"• Не отвечает на ЛЮБЫЕ сообщения\n"
+        f"• Не отправляет никаких уведомлений\n"
+        f"• Полностью игнорирует чат\n\n"
+        f"🔔 Используйте /wakeup чтобы разбудить досрочно."
+    )
+    
+    logger.info(f"🤖 Бот уснул на {hours} часов по команде от {update.effective_user.id}")
+
+async def wakeup_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для пробуждения бота"""
+    global BOT_SLEEP_MODE, BOT_SLEEP_UNTIL
+    
+    if not BOT_SLEEP_MODE:
+        await update.message.reply_text("🤖 Бот уже не спит! ☀️")
+        return
+    
+    BOT_SLEEP_MODE = False
+    BOT_SLEEP_UNTIL = None
+    
+    await update.message.reply_text(
+        "🤖 Бот проснулся и готов к работе! ☀️\n"
+        "Все команды снова активны!"
+    )
+    
+    logger.info(f"🤖 Бот разбужен командой от {update.effective_user.id}")
+
+async def check_sleep_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для проверки статуса сна бота"""
+    global BOT_SLEEP_MODE, BOT_SLEEP_UNTIL, BOT_SLEEP_REASON
+    
+    if not BOT_SLEEP_MODE:
+        await update.message.reply_text("🤖 Бот не спит, работает в обычном режиме. ☀️")
+        return
+    
+    now = datetime.datetime.now()
+    time_left = BOT_SLEEP_UNTIL - now
+    hours = int(time_left.total_seconds() // 3600)
+    minutes = int((time_left.total_seconds() % 3600) // 60)
+    
+    await update.message.reply_text(
+        f"🤖 Бот находится в режиме полного сна. 💤\n\n"
+        f"⏰ Проснется в: {BOT_SLEEP_UNTIL.strftime('%H:%M (%d.%m)')}\n"
+        f"⏳ Осталось спать: {hours}ч {minutes}м\n"
+        f"📝 Причина: {BOT_SLEEP_REASON}\n\n"
+        f"🔔 Используйте /wakeup чтобы разбудить досрочно."
+    )
+
+class SleepFilter:
+    """Фильтр, который полностью игнорирует сообщения когда бот спит"""
+    
+    async def __call__(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        # Если бот спит - ИГНОРИРУЕМ ВСЕ сообщения
+        if is_bot_sleeping():
+            # Логируем, но не отвечаем
+            logger.info(f"🤖 Игнорируем сообщение от {update.effective_user.id} (бот в режиме сна)")
+            return False  # Не пропускаем сообщение дальше
+        
+        # Если бот не спит - пропускаем сообщение
+        return True
+
+# ================================================
+
 # Команды бота
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, спит ли бот
-    if await check_bot_sleep_mode(update, context):
-        return
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
     
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name or "Игрок"
@@ -676,9 +726,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 Привет, {user_name}! Добро пожаловать в игру 'Виртуальный ребенок'!\n\n"
         "Вы становитесь родителем ребенка, который будет расти и развиваться.\n"
         "Теперь доступны соревнования с другими игроками! 🏆\n\n"
-        "Новые команды:\n"
+        "Новые команды сна:\n"
         f"/sleepbot [часы] - усыпить бота на время (по умолчанию 8 часов)\n"
-        f"/wakeup - разбудить бота досрочно\n\n"
+        f"/wakeup - разбудить бота досрочно\n"
+        f"/sleepstatus - статус сна бота\n\n"
         "К 13 годам ребенок может:\n"
         "✅ Разбогатеть и стать успешным\n"
         "❌ Попасть в тюрьму из-за плохого воспитания\n\n"
@@ -687,8 +738,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def set_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_bot_sleep_mode(update, context):
-        return
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
     
     query = update.callback_query
     await query.answer()
@@ -703,8 +755,9 @@ async def set_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_bot_sleep_mode(update, context):
-        return
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
     
     user_id = update.effective_user.id
     name = update.message.text.strip()
@@ -727,10 +780,11 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎉 Поздравляем, {user_name}! У вас родился{'ся' if gender == Gender.BOY else 'ась'} {name}!\n\n"
         f"Теперь вы можете ухаживать за своим ребенком и соревноваться с другими!\n\n"
         f"Новые команды:\n"
-        f"/sleepbot [часы] - усыпить бота на время\n"
+        f"/sleepbot - усыпить бота на время (8 часов по умолчанию)\n"
         f"/wakeup - разбудить бота досрочно\n"
-        f"/sleep - уложить спать на 8 часов\n"
-        f"/rest - отдохнуть 1 час (бот не будет отвечать)\n"
+        f"/sleepstatus - статус сна бота\n"
+        f"/sleep - уложить спать на 8 часов (персонажа)\n"
+        f"/rest - отдохнуть 1 час (персонажа)\n"
         f"/tournament - турнирная таблица\n"
         f"/rating - ваш рейтинг\n\n"
         f"Старые команды:\n"
@@ -745,8 +799,9 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update, context)
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_bot_sleep_mode(update, context):
-        return
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
     
     keyboard = [
         [InlineKeyboardButton("📊 Статус", callback_data="action_status")],
@@ -754,7 +809,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👶 Уход", callback_data="action_care")],
         [InlineKeyboardButton("💤 Сон/Отдых", callback_data="action_rest")],
         [InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
-        [InlineKeyboardButton("🔮 Судьба", callback_data="action_destiny")]
+        [InlineKeyboardButton("🔮 Судьба", callback_data="action_destiny")],
+        [InlineKeyboardButton("🤖 Управление ботом", callback_data="action_bot_control")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -769,9 +825,35 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup
         )
 
+async def bot_control_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Меню управления сном бота"""
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
+    
+    keyboard = [
+        [InlineKeyboardButton("🤖 Усыпить бота (8ч)", callback_data="bot_sleep_8"),
+         InlineKeyboardButton("🤖 Усыпить бота (4ч)", callback_data="bot_sleep_4")],
+        [InlineKeyboardButton("🤖 Усыпить бота (1ч)", callback_data="bot_sleep_1"),
+         InlineKeyboardButton("☀️ Разбудить бота", callback_data="bot_wakeup")],
+        [InlineKeyboardButton("📊 Статус сна бота", callback_data="bot_sleep_status"),
+         InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "🤖 *Управление сном бота:*\n\n"
+        "В этом меню вы можете управлять глобальным сном бота.\n"
+        "Когда бот спит, он НЕ ОТВЕЧАЕТ на ЛЮБЫЕ сообщения.\n\n"
+        "Выберите действие:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_bot_sleep_mode(update, context):
-        return
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
     
     user_id = update.effective_user.id
     
@@ -796,7 +878,12 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     position = tournament.get_player_position(user_id)
     rating = tamagochi.update_rating()
     
+    # Проверяем глобальный сон бота
+    bot_sleep_status = "💤 СПИТ" if is_bot_sleeping() else "☀️ БОДРСТВУЕТ"
+    
     status_text = f"""
+🤖 *Статус бота:* {bot_sleep_status}
+
 👤 *{tamagochi.name}* ({tamagochi.gender.value})
 👑 Владелец: {user_names.get(user_id, 'Игрок')}
 🏆 Рейтинг: {rating} очков (Место #{position if position > 0 else 'не в таблице'})
@@ -847,7 +934,8 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👶 Уход", callback_data="action_care"),
          InlineKeyboardButton("💤 Отдых", callback_data="action_rest")],
         [InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament"),
-         InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
+         InlineKeyboardButton("🤖 Управление", callback_data="action_bot_control")],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -867,8 +955,9 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data()
 
 async def daily_routine(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_bot_sleep_mode(update, context):
-        return
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
     
     user_id = update.effective_user.id
     
@@ -1021,8 +1110,9 @@ async def daily_routine(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def care_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_bot_sleep_mode(update, context):
-        return
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
     
     user_id = update.effective_user.id
     
@@ -1066,8 +1156,9 @@ async def care_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_bot_sleep_mode(update, context):
-        return
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
     
     query = update.callback_query
     await query.answer()
@@ -1159,13 +1250,13 @@ async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Если учились 4 раза подряд - нужен отдых
             if tamagochi.consecutive_study >= 4:
                 tamagochi.start_rest(1)
-                result_text = f"📚 Вы позанимались с {tamagochi.name}! Интеллект повышен 🧠\n\n{tamagochi.name} переутомился и теперь отдыхает 1 час."
-                cooldown_added = True
+                result_text = f"📚 Вы позанимались с {tamagochi.name}! Интеллект повышен 🧠\n\n{tamagochi.name} переутомился{'ась' if tamagochi.gender == Gender.GIRL else ''} и теперь отдыхает 1 час."
             else:
                 result_text = f"📚 Вы позанимались с {tamagochi.name}! Интеллект повышен 🧠"
-                # Кулдаун на учебу: 30 минут
-                tamagochi.study_cooldown = datetime.datetime.now() + datetime.timedelta(minutes=30)
-                cooldown_added = True
+                
+            # Кулдаун на учебу: 30 минут
+            tamagochi.study_cooldown = datetime.datetime.now() + datetime.timedelta(minutes=30)
+            cooldown_added = True
     
     elif action == "play":
         if tamagochi.energy < 15:
@@ -1175,14 +1266,12 @@ async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tamagochi.energy = max(0, tamagochi.energy - 10)
             tamagochi.social = min(100, tamagochi.social + 5)
             tamagochi.daily_stats["entertainment"] += 1
+            result_text = f"🎮 Вы поиграли с {tamagochi.name}! Настроение улучшено 😊"
             
             # Если играли 3 раза подряд - нужен отдых
             if tamagochi.consecutive_play >= 3:
                 tamagochi.start_rest(1)
-                result_text = f"🎮 Вы поиграли с {tamagochi.name}! Настроение улучшено 😊\n\n{tamagochi.name} устал от игр и теперь отдыхает 1 час."
-                cooldown_added = True
-            else:
-                result_text = f"🎮 Вы поиграли с {tamagochi.name}! Настроение улучшено 😊"
+                result_text += f"\n\n{tamagochi.name} устал{'а' if tamagochi.gender == Gender.GIRL else ''} от игр и теперь отдыхает 1 час."
             
     elif action == "create":
         tamagochi.creativity = min(100, tamagochi.creativity + 10)
@@ -1192,10 +1281,6 @@ async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Обновляем настроение и сохраняем
     tamagochi.update_mood()
-    
-    # Обновляем турнирную таблицу
-    tournament.update_player(user_id, tamagochi, user_names.get(user_id, "Игрок"))
-    
     save_data()
     
     # Показываем результат и возвращаем в меню ухода
@@ -1203,8 +1288,9 @@ async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await care_menu(update, context)
 
 async def random_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_bot_sleep_mode(update, context):
-        return
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
     
     user_id = update.effective_user.id
     
@@ -1239,7 +1325,7 @@ async def random_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result_text += f"👥 Общительность: {'+' if effect_value > 0 else ''}{effect_value}\n"
     elif effect_type == "reputation":
         tamagochi.reputation = max(0, min(100, tamagochi.reputation + effect_value))
-        result_text += f"⭐ Репутация: {'+' if effect_type == 'reputation' and effect_value > 0 else ''}{effect_value}\n"
+        result_text += f"⭐ Репутация: {'+' if effect_value > 0 else ''}{effect_value}\n"
     elif effect_type == "creativity":
         tamagochi.creativity = max(0, min(100, tamagochi.creativity + effect_value))
         result_text += f"🎨 Творчество: {'+' if effect_value > 0 else ''}{effect_value}\n"
@@ -1276,8 +1362,9 @@ async def random_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_bot_sleep_mode(update, context):
-        return
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
     
     user_id = update.effective_user.id
     
@@ -1414,84 +1501,26 @@ async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-async def tournament_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_bot_sleep_mode(update, context):
-        return
-    
-    user_id = update.effective_user.id
-    leaderboard = tournament.get_leaderboard(15)
-    
-    if not leaderboard:
-        await update.message.reply_text("🏆 Турнирная таблица пуста! Создайте ребенка и начните играть!")
-        return
-    
-    leaderboard_text = "🏆 *ТУРНИРНАЯ ТАБЛИЦА*\n\n"
-    leaderboard_text += "```\n"
-    leaderboard_text += "№  Игрок                 Ребенок           Очки  Возр\n"
-    leaderboard_text += "─" * 55 + "\n"
-    
-    for i, (player_id, data) in enumerate(leaderboard, 1):
-        player_name = data['owner_name'][:15]
-        child_name = data['name'][:12]
-        rating = str(data['rating'])[:6]
-        age = str(data['age'])
-        
-        # Выделяем текущего пользователя
-        if player_id == user_id:
-            leaderboard_text += f"▶ {i:2} {player_name:15} {child_name:12} {rating:>6} {age:>4}\n"
-        else:
-            leaderboard_text += f"  {i:2} {player_name:15} {child_name:12} {rating:>6} {age:>4}\n"
-    
-    leaderboard_text += "```\n\n"
-    
-    # Добавляем статистику текущего игрока
-    if user_id in tournament.leaderboard:
-        position = tournament.get_player_position(user_id)
-        player_data = tournament.leaderboard[user_id]
-        leaderboard_text += f"*Ваша позиция:* #{position}\n"
-        leaderboard_text += f"*Ваши очки:* {player_data['rating']}\n"
-        leaderboard_text += f"*Карьерные очки:* {player_data['career']}\n"
-        leaderboard_text += f"*Криминальные очки:* {player_data['criminal']}"
-    
-    keyboard = [
-        [InlineKeyboardButton("📊 Мой статус", callback_data="action_status"),
-         InlineKeyboardButton("🔄 Обновить", callback_data="action_tournament")],
-        [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        leaderboard_text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_bot_sleep_mode(update, context):
-        return
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
     
     help_text = """
 🎮 *БОТ-ТАМАГОЧИ "ВИРТУАЛЬНЫЙ РЕБЕНОК"*
 
-🤖 *КОМАНДЫ УПРАВЛЕНИЯ БОТОМ:*
-/sleepbot [часы] - Усыпить бота на время (по умолч. 8 часов)
+🤖 *УПРАВЛЕНИЕ ГЛОБАЛЬНЫМ СНОМ БОТА:*
+/sleepbot [часы] - Усыпить бота на время (по умолчанию 8 часов)
 /wakeup - Разбудить бота досрочно
+/sleepstatus - Проверить статус сна бота
 
 👶 *ОСНОВНЫЕ КОМАНДЫ:*
 /start - Создать нового ребенка
 /status - Показать состояние ребенка
 /daily - Прожить день (утро-вечер)
-/care - Уход за ребенком
 /event - Случайное жизненное событие
 /destiny - Проверить судьбу
-
-⏰ *КОМАНДЫ ОТДЫХА:*
-/sleep - Уложить спать на 8 часов
-/rest - Отдохнуть 1 час (бот не будет отвечать)
-
-🏆 *СОРЕВНОВАНИЯ:*
-/tournament - Турнирная таблица
-/rating - Ваш рейтинг
+/help - Эта справка
 
 👆 *ИЛИ ИСПОЛЬЗУЙТЕ КНОПКИ В МЕНЮ*
 
@@ -1522,11 +1551,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ✅ *РАЗБОГАТЕЛ* (много карьерных очков)
 ❌ *НЕ ПОПАЛ В ТЮРЬМУ* (мало криминальных очков)
 
-🏆 *ТУРНИРНАЯ СИСТЕМА:*
-• Рейтинг рассчитывается из всех характеристик
-• Чем выше рейтинг - тем выше место в таблице
-• Соревнуйтесь с другими игроками!
-
 📊 *ВАЖНЫЕ ПОКАЗАТЕЛИ:*
 • ❤️ Здоровье - если упадет до 0, игра окончена
 • 😊 Счастье - влияет на настроение и события
@@ -1552,9 +1576,38 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
+async def handle_bot_control(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопок управления сном бота"""
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
+    
+    query = update.callback_query
+    await query.answer()
+    
+    action = query.data
+    
+    if action == "bot_sleep_8":
+        # Эмулируем команду /sleepbot 8
+        context.args = ["8"]
+        await sleep_bot_command(update, context)
+    elif action == "bot_sleep_4":
+        context.args = ["4"]
+        await sleep_bot_command(update, context)
+    elif action == "bot_sleep_1":
+        context.args = ["1"]
+        await sleep_bot_command(update, context)
+    elif action == "bot_wakeup":
+        await wakeup_bot_command(update, context)
+    elif action == "bot_sleep_status":
+        await check_sleep_status_command(update, context)
+    
+    await bot_control_menu(update, context)
+
 async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await check_bot_sleep_mode(update, context):
-        return
+    # Проверяем, спит ли бот глобально
+    if is_bot_sleeping():
+        return  # Игнорируем команду полностью
     
     query = update.callback_query
     await query.answer()
@@ -1574,16 +1627,12 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "menu":
         await show_main_menu(update, context)
     elif action == "rest":
-        user_id = query.from_user.id
-        if user_id in user_tamagochi:
-            tamagochi = user_tamagochi[user_id]
-            result = tamagochi.start_rest(1)
-            await query.message.reply_text(result)
-        else:
-            await query.message.reply_text("У вас еще нет ребенка!")
-        await show_main_menu(update, context)
+        await care_menu(update, context)
     elif action == "tournament":
-        await tournament_leaderboard(update, context)
+        # Здесь можно добавить функцию турнирной таблицы
+        await update.message.reply_text("🏆 Турнирная таблица в разработке...")
+    elif action == "bot_control":
+        await bot_control_menu(update, context)
     elif action == "reset_day":
         user_id = query.from_user.id
         if user_id in user_tamagochi:
@@ -1604,6 +1653,22 @@ def main():
     # Создание приложения
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
+    # ========== ДОБАВЛЯЕМ ФИЛЬТР ГЛОБАЛЬНОГО СНА ==========
+    sleep_filter = SleepFilter()
+    
+    # Создаем обертку для всех обработчиков
+    async def filtered_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Проверяем глобальный сон
+        if await sleep_filter(update, context):
+            # Бот не спит, пропускаем дальше
+            return True
+        # Бот спит, останавливаем обработку
+        return False
+    
+    # Применяем фильтр ко ВСЕМ обновлениям
+    application.add_handler(TypeHandler(Update, filtered_handler), group=-1)
+    # =======================================================
+    
     # Обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
@@ -1611,15 +1676,11 @@ def main():
     application.add_handler(CommandHandler("daily", daily_routine))
     application.add_handler(CommandHandler("event", random_event))
     application.add_handler(CommandHandler("destiny", check_destiny))
-    application.add_handler(CommandHandler("tournament", tournament_leaderboard))
     
-    # Новые команды для сна бота
-    application.add_handler(CommandHandler("sleepbot", sleep_bot))
-    application.add_handler(CommandHandler("wakeup", wakeup_bot))
-    
-    # Старые команды отдыха
-    application.add_handler(CommandHandler("sleep", sleep_bot))  # Алиас для совместимости
-    application.add_handler(CommandHandler("rest", sleep_bot))   # Алиас для совместимости
+    # Команды управления сном бота
+    application.add_handler(CommandHandler("sleepbot", sleep_bot_command))
+    application.add_handler(CommandHandler("wakeup", wakeup_bot_command))
+    application.add_handler(CommandHandler("sleepstatus", check_sleep_status_command))
     
     # Обработчики сообщений для установки имени
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_name))
@@ -1628,6 +1689,7 @@ def main():
     application.add_handler(CallbackQueryHandler(set_gender, pattern="^gender_"))
     application.add_handler(CallbackQueryHandler(handle_main_menu, pattern="^action_"))
     application.add_handler(CallbackQueryHandler(handle_care, pattern="^care_"))
+    application.add_handler(CallbackQueryHandler(handle_bot_control, pattern="^bot_"))
     
     # Сохранение данных при завершении
     import atexit
@@ -1635,12 +1697,11 @@ def main():
     
     # Запуск бота
     print("🎮 Бот Тамагочи 'Виртуальный ребенок' запущен!")
-    print("🤖 Доступны команды: /sleepbot и /wakeup для управления режимом сна бота")
+    print("🤖 Добавлен режим глобального сна: /sleepbot, /wakeup, /sleepstatus")
     print("🔐 Используется безопасное хранение токена через .env файл")
-    print("🚀 Нажмите Ctrl+C для остановки")
+    print("🚀 Нажми Ctrl+C для остановки")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
-
