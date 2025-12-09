@@ -1,7 +1,6 @@
 import os
-import logging
-import sys
 import random
+import logging
 
 # Настройка логирования
 logging.basicConfig(
@@ -10,15 +9,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Импорты Telegram
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
 # Получаем токен
 TOKEN = os.getenv('BOT_TOKEN')
 if not TOKEN:
-    logger.error("ТОКЕН НЕ НАЙДЕН! Добавьте BOT_TOKEN в настройки Render")
-    sys.exit(1)
+    print("❌ ОШИБКА: BOT_TOKEN не найден!")
+    print("Добавьте переменную BOT_TOKEN в настройки Render")
+    exit(1)
+
+# Импорты Telegram (новый стиль для версии 21.x)
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Факты о генетике
 GENETIC_FACTS = [
@@ -32,134 +32,136 @@ GENETIC_FACTS = [
     "🦠 Вирусы тоже имеют свою ДНК или РНК!"
 ]
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start"""
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /start"""
     user = update.effective_user
-    response = "🧬 Привет, " + user.first_name + "!\n\n"
-    response += "Я — Генетический бот 🧬\n"
-    response += "Расскажу о генетике в игровой форме!\n\n"
-    response += "Команды:\n"
-    response += "/start - приветствие\n"
-    response += "/fact - случайный факт\n"
-    response += "/dna - создать ДНК-существо\n"
-    response += "/help - помощь\n\n"
-    response += "Просто напиши 'привет'!"
-    await update.message.reply_text(response)
+    message = (
+        f"🧬 Привет, {user.first_name}!\n\n"
+        f"Я — Генетический бот 🧬\n"
+        f"Расскажу о генетике в игровой форме!\n\n"
+        f"📋 Команды:\n"
+        f"/start - приветствие\n"
+        f"/fact - случайный факт\n"
+        f"/dna - создать ДНК-существо\n"
+        f"/help - помощь\n\n"
+        f"Напиши 'привет' или используй команды!"
+    )
+    await update.message.reply_text(message)
 
-async def fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /fact - случайный факт"""
-    fact_text = random.choice(GENETIC_FACTS)
-    response = "📚 Факт о генетике:\n\n" + fact_text
-    await update.message.reply_text(response)
+async def fact_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /fact"""
+    fact = random.choice(GENETIC_FACTS)
+    await update.message.reply_text(f"📚 Факт о генетике:\n\n{fact}")
 
-async def dna(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /dna - создать существо"""
-    # Части существ
-    heads = ["🐱 кот", "🐶 собака", "🦊 лиса", "🐰 кролик", "🐻 медведь", "🐯 тигр"]
-    colors = ["красный", "зеленый", "синий", "желтый", "фиолетовый", "радужный"]
-    powers = ["супер-сила", "телепатия", "невидимость", "полет", "быстрый бег", "ночное зрение"]
+async def dna_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /dna"""
+    # Генерируем случайное существо
+    animals = ["🐱 Кот", "🐶 Собака", "🦊 Лиса", "🐰 Кролик", "🐻 Медведь", "🐯 Тигр"]
+    colors = ["🔴 Красный", "🟢 Зеленый", "🔵 Синий", "🟡 Желтый", "🟣 Фиолетовый", "⚫ Черный"]
+    powers = ["🦸 Супер-сила", "🧠 Телепатия", "👻 Невидимость", "✈️ Полет", "🏃 Быстрый бег", "👁️ Ночное зрение"]
     
-    head = random.choice(heads)
+    animal = random.choice(animals)
     color = random.choice(colors)
     power = random.choice(powers)
     creature_id = random.randint(1000, 9999)
-    gene_type = "доминантный" if random.random() > 0.5 else "рецессивный"
     
-    message = "🧪 Твое ДНК-существо создано!\n\n"
-    message += "Внешность: " + head + "\n"
-    message += "Цвет: " + color + "\n"
-    message += "Суперсила: " + power + "\n\n"
-    message += "🎲 ID: " + str(creature_id) + "\n"
-    message += "🔬 Тип генов: " + gene_type + "\n\n"
-    
-    if gene_type == "доминантный":
-        message += "💡 Факт: Доминантные гены проявляются чаще!"
-    else:
-        message += "💡 Факт: Рецессивные гены могут скрываться!"
-    
+    message = (
+        f"🧪 Твое ДНК-существо создано!\n\n"
+        f"🎭 Вид: {animal}\n"
+        f"🎨 Цвет: {color}\n"
+        f"⚡ Суперсила: {power}\n\n"
+        f"🔢 ID: {creature_id}\n"
+        f"🧬 Гены: {'доминантные' if random.random() > 0.5 else 'рецессивные'}\n\n"
+        f"✨ Уникальное создание готово к приключениям!"
+    )
     await update.message.reply_text(message)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /help"""
-    response = "🤖 Генетический бот - Помощь\n\n"
-    response += "Я умею:\n"
-    response += "• Рассказывать факты о генетике /fact\n"
-    response += "• Создавать ДНК-существ /dna\n"
-    response += "• Отвечать на вопросы\n\n"
-    response += "Попробуй команду /dna !"
-    await update.message.reply_text(response)
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /help"""
+    message = (
+        "🤖 Генетический бот - Помощь\n\n"
+        "📚 Я умею:\n"
+        "• /fact - рассказывать интересные факты о генетике\n"
+        "• /dna - создавать уникальных ДНК-существ\n"
+        "• Отвечать на простые вопросы\n\n"
+        "💡 Просто напиши:\n"
+        "- 'привет' для начала\n"
+        "- 'ген' или 'днк' чтобы узнать больше\n"
+        "- или используй команды выше!"
+    )
+    await update.message.reply_text(message)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработка обычных сообщений"""
     text = update.message.text.lower()
     
-    if 'привет' in text or 'здравствуй' in text or 'хай' in text:
-        await update.message.reply_text("👋 Привет! Узнаем о генетике? Используй /fact")
-    elif 'ген' in text:
-        await update.message.reply_text("🧬 Гены - это инструкции для организма! Попробуй /dna")
-    elif 'днк' in text:
-        await update.message.reply_text("🔬 ДНК - молекула наследственности! Хочешь факт? /fact")
-    elif 'как дела' in text:
-        await update.message.reply_text("Отлично! Готов создавать ДНК-существ! /dna")
-    elif 'что умеешь' in text:
-        await update.message.reply_text("Я рассказываю о генетике! Используй /help")
-    elif 'спасибо' in text or 'благодарю' in text:
-        await update.message.reply_text("😊 Всегда рад! Продолжай изучать науку!")
-    elif 'хочу играть' in text or 'игра' in text:
-        await update.message.reply_text("🎮 Отлично! Давай создадим существо! /dna")
-    elif 'факт' in text:
-        await update.message.reply_text("📚 Используй команду /fact")
-    elif 'создать' in text or 'существо' in text:
-        await update.message.reply_text("🧪 Используй /dna для создания существа")
+    if any(word in text for word in ['привет', 'здравствуй', 'хай', 'hello', 'hi']):
+        await update.message.reply_text("👋 Привет! Давай изучать генетику вместе! Используй /fact")
+    
+    elif any(word in text for word in ['ген', 'генетика']):
+        await update.message.reply_text("🧬 Гены - это инструкции для нашего организма! Хочешь создать свое существо? /dna")
+    
+    elif any(word in text for word in ['днк', 'dna']):
+        await update.message.reply_text("🔬 ДНК хранит всю генетическую информацию! Узнать факт? /fact")
+    
+    elif any(word in text for word in ['спасибо', 'благодарю', 'thanks']):
+        await update.message.reply_text("😊 Рад помочь! Продолжай изучать науку! 🧪")
+    
+    elif any(word in text for word in ['как дела', 'что нового']):
+        await update.message.reply_text("Отлично! Готов создавать новых существ! /dna")
+    
     else:
         await update.message.reply_text(
-            "Не совсем понял... Попробуй команду:\n" +
-            "/fact - интересный факт\n" +
-            "/dna - создать существо\n" +
-            "/help - помощь"
+            "🤔 Не совсем понял...\n"
+            "Попробуй:\n"
+            "• /fact - узнать факт\n"
+            "• /dna - создать существо\n"
+            "• /help - помощь\n"
+            "• или напиши 'привет'"
         )
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ошибок"""
-    logger.error("Ошибка: %s", context.error)
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик ошибок"""
+    logger.error(f"Ошибка: {context.error}")
     try:
         if update and update.effective_message:
-            await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуй еще раз!")
+            await update.effective_message.reply_text("⚠️ Что-то пошло не так. Попробуй еще раз!")
     except:
         pass
 
-def main():
-    """Запуск бота"""
-    logger.info("🚀 Запуск генетического бота...")
-    
-    # Проверяем Python версию
-    logger.info("Python version: %s", sys.version)
+def main() -> None:
+    """Основная функция запуска бота"""
+    print("=" * 50)
+    print("🚀 ЗАПУСК ГЕНЕТИЧЕСКОГО БОТА")
+    print("=" * 50)
     
     # Создаем приложение
     try:
-        app = Application.builder().token(TOKEN).build()
+        application = Application.builder().token(TOKEN).build()
+        print("✅ Приложение создано успешно")
     except Exception as e:
-        logger.error("Ошибка создания приложения: %s", e)
-        sys.exit(1)
+        print(f"❌ Ошибка создания приложения: {e}")
+        return
     
-    # Добавляем обработчики
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("fact", fact))
-    app.add_handler(CommandHandler("dna", dna))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Регистрируем обработчики команд
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("fact", fact_command))
+    application.add_handler(CommandHandler("dna", dna_command))
+    application.add_handler(CommandHandler("help", help_command))
     
-    # Обработчик ошибок
-    app.add_error_handler(error_handler)
+    # Регистрируем обработчик текстовых сообщений
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Запускаем
-    logger.info("✅ Бот запущен! Ожидаю сообщений...")
+    # Регистрируем обработчик ошибок
+    application.add_error_handler(error_handler)
     
-    try:
-        app.run_polling(drop_pending_updates=True)
-    except Exception as e:
-        logger.error("Ошибка запуска бота: %s", e)
-        sys.exit(1)
+    print("✅ Обработчики зарегистрированы")
+    print("🤖 Бот запущен и готов к работе!")
+    print("📱 Ищите бота в Telegram и напишите /start")
+    print("=" * 50)
+    
+    # Запускаем бота
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
