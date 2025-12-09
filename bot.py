@@ -1,1476 +1,1041 @@
-import logging
-import random
-import json
-import datetime
 import os
+import json
+import random
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
 from enum import Enum
-from typing import Dict, List
+import asyncio
+from dataclasses import dataclass, asdict
+from collections import defaultdict
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, 
-    CommandHandler, 
-    CallbackQueryHandler, 
-    MessageHandler, 
-    filters, 
-    ContextTypes,
-    ConversationHandler
+    Application, CommandHandler, CallbackQueryHandler,
+    ContextTypes, MessageHandler, filters
 )
-from dotenv import load_dotenv
+from telegram.error import NetworkError
+import nest_asyncio
 
-load_dotenv()
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-
-if not TELEGRAM_TOKEN:
-    print("❌ ОШИБКА: Токен бота не найден!")
-    exit(1)
-
+# Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ГЛОБАЛЬНЫЙ ФЛАГ СОСТОЯНИЯ СНА БОТА
-BOT_IS_SLEEPING = False
+# Конфигурация
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+CHANNEL_ID = os.getenv('CHANNEL_ID', '')
+PORT = int(os.environ.get('PORT', 8443))
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
+DATA_FILE = 'tamagotchi_data.json'
+TOURNAMENT_FILE = 'tournament_data.json'
 
-# Состояния персонажа
+# Автоматическая обработка вложенных асинхронных вызовов для Render
+nest_asyncio.apply()
+
+# Перечисления состояний
 class Gender(Enum):
     BOY = "мальчик"
     GIRL = "девочка"
 
 class Mood(Enum):
-    HAPPY = "😊 Счастливый"
-    NEUTRAL = "😐 Нейтральный"
-    SAD = "😢 Грустный"
-    ANGRY = "😠 Злой"
-    SICK = "🤒 Болен"
-    EXCITED = "🤩 В восторге"
-    TIRED = "😪 Уставший"
+    HAPPY = "счастливый"
+    SAD = "грустный"
+    ANGRY = "злой"
+    TIRED = "уставший"
+    ENERGETIC = "энергичный"
 
-class AgeGroup(Enum):
-    BABY = "младенец (0-2)"
-    CHILD = "ребёнок (3-6)"
-    SCHOOL1 = "младший школьник (7-10)"
-    SCHOOL2 = "подросток (11-13)"
-    TEEN = "подросток (14-16)"
-    ADULT = "взрослый (17+)"
+class Action(Enum):
+    WAKE_UP = "проснуться"
+    WASH = "умыться"
+    BREAKFAST = "завтракать"
+    EXERCISE = "зарядка"
+    MAKE_BED = "заправить кровать"
+    READ = "читать книги"
+    SCHOOL = "школа"
+    LUNCH = "обед"
+    DINNER = "ужин"
+    BATH = "ванна"
+    SHOWER = "душ"
+    COMPUTER = "игры на компьютере"
+    DRAW = "рисовать"
+    VISIT = "ходить в гости"
+    WALK = "гулять"
+    CINEMA = "кинотеатр"
+    MUSEUM = "музей"
+    EXHIBITION = "выставка"
+    THEATER = "театр"
+    TUTOR = "репетитор"
+    PARTY = "вечеринка"
+    SLEEPOVER = "ночевка"
+    BAKE = "печь печенье"
+    FIGHT = "драться"
+    LOVE = "влюбляться"
+    BLOG = "вести блог"
+    CHAT = "общаться"
+    SLEEP = "спать"
 
-# Генератор текста для событий
-class EventGenerator:
-    @staticmethod
-    def get_morning_event(name: str, gender: Gender, discipline: int) -> str:
-        events = [
-            f"{name} {'' if gender == Gender.BOY else 'само'}проснулся{'ась' if gender == Gender.GIRL else ''} с первыми лучами солнца! ☀️",
-            f"{name} не хотел{'а' if gender == Gender.GIRL else ''} вставать, но будильник сделал свое дело. ⏰",
-            f"{name} встретил{'а' if gender == Gender.GIRL else ''} утро с улыбкой и бодростью! 😄"
-        ]
-        if discipline > 70:
-            return random.choice([
-                f"{name} сам{'о' if gender == Gender.GIRL else ''} проснулся{'ась' if gender == Gender.GIRL else ''} по расписанию, без будильника! ⭐",
-                f"{name} начал{'а' if gender == Gender.GIRL else ''} день с утренней медитации. 🧘"
-            ])
-        return random.choice(events)
+@dataclass
+class Tamagotchi:
+    user_id: int
+    name: str
+    gender: Gender
+    age: int = 0  # в годах
+    health: int = 100
+    happiness: int = 100
+    intelligence: int = 50
+    money: int = 0
+    reputation: int = 50
+    last_action: Optional[str] = None
+    last_action_time: Optional[datetime] = None
+    is_sleeping: bool = True
+    sleep_time: Optional[datetime] = None
+    wake_up_time: Optional[datetime] = None
+    created_at: datetime = datetime.now()
+    actions_history: List[str] = None
+    daily_schedule: Dict[str, bool] = None
     
-    @staticmethod
-    def get_school_event(name: str, gender: Gender, lessons: int) -> str:
-        if lessons == 0:
-            return random.choice([
-                f"{name} решил{'а' if gender == Gender.GIRL else ''} прогулять школу и отправился{'ась' if gender == Gender.GIRL else ''} в парк. 🌳",
-                f"{name} притворился{'ась' if gender == Gender.GIRL else ''} больным{'ой' if gender == Gender.GIRL else 'ым'}, чтобы не идти в школу. 🤒",
-                f"{name} забыл{'а' if gender == Gender.GIRL else ''} про школу и проспал{'а' if gender == Gender.GIRL else ''} все уроки. 😴"
-            ])
-        
-        subjects = ["математике", "литературе", "истории", "биологии", "физике", "химии"]
-        event = random.choice([
-            f"получил{'а' if gender == Gender.GIRL else ''} пятерку по {random.choice(subjects)}! 🏆",
-            f"участвовал{'а' if gender == Gender.GIRL else ''} в олимпиаде по {random.choice(subjects)}. 📝",
-            f"помог{'ла' if gender == Gender.GIRL else ''} однокласснику с домашним заданием. 👥",
-            f"поссорился{'ась' if gender == Gender.GIRL else ''} с другом на перемене. 😠",
-            f"съел{'а' if gender == Gender.GIRL else ''} вкусный пирог в столовой. 🥧"
-        ])
-        return f"В школе {name} {event}"
-    
-    @staticmethod
-    def get_evening_event(name: str, gender: Gender) -> str:
-        activities = [
-            ("играл{'а' if gender == Gender.GIRL else ''} в компьютерные игры", "🎮"),
-            ("рисовал{'а' if gender == Gender.GIRL else ''} картину", "🎨"),
-            ("читал{'а' if gender == Gender.GIRL else ''} интересную книгу", "📚"),
-            ("готовил{'а' if gender == Gender.GIRL else ''} печенье", "🍪"),
-            ("смотрел{'а' if gender == Gender.GIRL else ''} фильм", "🎬"),
-            ("занимался{'ась' if gender == Gender.GIRL else ''} спортом", "💪"),
-            ("ходил{'а' if gender == Gender.GIRL else ''} в гости к другу", "👥"),
-            ("посетил{'а' if gender == Gender.GIRL else ''} выставку", "🖼️"),
-            ("был{'а' if gender == Gender.GIRL else ''} в театре", "🎭"),
-            ("гулял{'а' if gender == Gender.GIRL else ''} в парке", "🌳")
-        ]
-        activity, emoji = random.choice(activities)
-        return f"Вечером {name} {activity}. {emoji}"
-    
-    @staticmethod
-    def get_life_event(name: str, gender: Gender) -> tuple:
-        events = [
-            (f"{name} нашёл{'ла' if gender == Gender.GIRL else ''} на улице кошелек и сдал{'а' if gender == Gender.GIRL else ''} его в полицию", "reputation", 15, "money", 10),
-            (f"{name} помог{'ла' if gender == Gender.GIRL else ''} пожилому человеку донести сумки", "social", 10, "reputation", 10),
-            (f"{name} выиграл{'а' if gender == Gender.GIRL else ''} школьную олимпиаду", "intelligence", 10, "career", 20),
-            (f"{name} получил{'а' if gender == Gender.GIRL else ''} стипендию за хорошую учебу", "money", 50, "discipline", 10),
-            (f"{name} подрался{'ась' if gender == Gender.GIRL else ''} с одноклассником", "health", -15, "criminal", 10),
-            (f"{name} прогулял{'а' if gender == Gender.GIRL else ''} все уроки", "discipline", -10, "criminal", 15),
-            (f"{name} организовал{'а' if gender == Gender.GIRL else ''} вечеринку для друзей", "social", 15, "happiness", 20),
-            (f"{name} начал{'а' if gender == Gender.GIRL else ''} вести блог о своих увлечениях", "creativity", 10, "social", 10)
-        ]
-        return random.choice(events)
-
-# Класс Тамагочи
-class Tamagochi:
-    def __init__(self, name: str, gender: Gender, owner_id: int):
-        self.name = name
-        self.gender = gender
-        self.owner_id = owner_id
-        self.age_days = 0
-        self.age_group = AgeGroup.BABY
-        
-        # Основные характеристики
-        self.health = 100
-        self.hunger = 0
-        self.hygiene = 100
-        self.energy = 100
-        self.happiness = 100
-        self.intelligence = 10
-        self.money = 50
-        self.discipline = 50
-        self.social = 50
-        self.mood = Mood.HAPPY
-        self.reputation = 50
-        self.creativity = 50
-        
-        # Состояния
-        self.is_sleeping = True
-        self.is_sick = False
-        self.is_at_school = False
-        self.location = "дом"
-        self.current_activity = None
-        
-        # Достижения и история
-        self.skills = {
-            "учёба": 0,
-            "спорт": 0,
-            "творчество": 0,
-            "социальные": 0
-        }
-        self.daily_stats = {
-            "lessons_attended": 0,
-            "meals_eaten": 0,
-            "studied": 0,
-            "entertainment": 0
-        }
-        self.career_points = 0
-        self.criminal_points = 0
-        self.rating_points = 0  # Очки для турнирной таблицы
-        self.inventory = []
-        self.friends = []
-        self.relationships = {}
-        
-        # Время последних действий
-        self.last_meal = None
-        self.last_bath = None
-        self.last_study = None
-        
-        # Генератор событий
-        self.event_gen = EventGenerator()
-    
-    def update_age(self):
-        # Ускоренное взросление: 1 игровой день = 100 дней жизни
-        self.age_days += 100
-        
-        if self.age_days < 730:
-            self.age_group = AgeGroup.BABY
-        elif self.age_days < 2190:
-            self.age_group = AgeGroup.CHILD
-        elif self.age_days < 3650:
-            self.age_group = AgeGroup.SCHOOL1
-        elif self.age_days < 4745:
-            self.age_group = AgeGroup.SCHOOL2
-        elif self.age_days < 5840:
-            self.age_group = AgeGroup.TEEN
-        else:
-            self.age_group = AgeGroup.ADULT
-    
-    def update_mood(self):
-        if self.is_sick:
-            self.mood = Mood.SICK
-            return
-            
-        mood_score = (
-            self.happiness * 0.3 +
-            self.health * 0.2 +
-            (100 - self.hunger) * 0.2 +
-            self.energy * 0.15 +
-            (100 - self.hygiene) * 0.15
-        )
-        
-        if self.energy < 30:
-            self.mood = Mood.TIRED
-        elif mood_score > 85:
-            self.mood = Mood.HAPPY
-        elif mood_score > 70:
-            self.mood = Mood.EXCITED
-        elif mood_score > 50:
-            self.mood = Mood.NEUTRAL
-        elif mood_score > 30:
-            self.mood = Mood.SAD
-        else:
-            self.mood = Mood.ANGRY
-    
-    def natural_changes(self):
-        self.hunger += random.randint(1, 3)
-        self.hygiene -= random.randint(1, 5)
-        self.energy -= random.randint(1, 4)
-        
-        if self.hunger > 80:
-            self.health -= 2
-            self.happiness -= 3
-        elif self.hunger > 50:
-            self.health -= 1
-            self.happiness -= 1
-            
-        if self.hygiene < 30:
-            self.health -= 2
-            self.happiness -= 2
-            
-        if self.energy < 30:
-            self.health -= 1
-            
-        if random.random() < 0.1 and self.hygiene < 40:
-            self.is_sick = True
-            self.health -= 10
-            
-        if self.hunger < 20 and self.hygiene > 80 and self.energy > 70:
-            self.happiness += random.randint(1, 3)
-            
-        self.health = max(0, min(100, self.health))
-        self.hunger = max(0, min(100, self.hunger))
-        self.hygiene = max(0, min(100, self.hygiene))
-        self.energy = max(0, min(100, self.energy))
-        self.happiness = max(0, min(100, self.happiness))
-        
-        self.update_mood()
-    
-    def update_rating(self):
-        """Обновление рейтинговых очков для турнирной таблицы"""
-        self.rating_points = (
-            self.career_points * 2 +
-            self.intelligence * 3 +
-            self.discipline * 2 +
-            self.social * 1 +
-            self.creativity * 1 -
-            self.criminal_points * 5
-        )
-        return self.rating_points
+    def __post_init__(self):
+        if self.actions_history is None:
+            self.actions_history = []
+        if self.daily_schedule is None:
+            self.daily_schedule = {
+                "woke_up": False,
+                "washed": False,
+                "breakfast": False,
+                "exercised": False,
+                "made_bed": False,
+                "studied": False,
+                "lunch": False,
+                "dinner": False,
+                "bathed": False
+            }
     
     def to_dict(self):
-        return {
-            "name": self.name,
-            "gender": self.gender.value,
-            "owner_id": self.owner_id,
-            "age_days": self.age_days,
-            "age_group": self.age_group.value,
-            "health": self.health,
-            "hunger": self.hunger,
-            "hygiene": self.hygiene,
-            "energy": self.energy,
-            "happiness": self.happiness,
-            "intelligence": self.intelligence,
-            "money": self.money,
-            "discipline": self.discipline,
-            "social": self.social,
-            "creativity": self.creativity,
-            "mood": self.mood.value,
-            "reputation": self.reputation,
-            "is_sleeping": self.is_sleeping,
-            "is_sick": self.is_sick,
-            "skills": self.skills,
-            "career_points": self.career_points,
-            "criminal_points": self.criminal_points,
-            "rating_points": self.rating_points,
-            "inventory": self.inventory,
-            "friends": self.friends
-        }
+        data = asdict(self)
+        data['gender'] = self.gender.value
+        data['created_at'] = self.created_at.isoformat()
+        if self.last_action_time:
+            data['last_action_time'] = self.last_action_time.isoformat()
+        if self.sleep_time:
+            data['sleep_time'] = self.sleep_time.isoformat()
+        if self.wake_up_time:
+            data['wake_up_time'] = self.wake_up_time.isoformat()
+        return data
     
     @classmethod
-    def from_dict(cls, data: dict):
-        gender = Gender(data["gender"])
-        owner_id = data.get("owner_id", 0)
-        tamagochi = cls(data["name"], gender, owner_id)
+    def from_dict(cls, data):
+        data = data.copy()
+        data['gender'] = Gender(data['gender'])
+        data['created_at'] = datetime.fromisoformat(data['created_at'])
         
-        tamagochi.age_days = data["age_days"]
-        tamagochi.age_group = AgeGroup(data["age_group"])
-        tamagochi.health = data["health"]
-        tamagochi.hunger = data["hunger"]
-        tamagochi.hygiene = data["hygiene"]
-        tamagochi.energy = data["energy"]
-        tamagochi.happiness = data["happiness"]
-        tamagochi.intelligence = data["intelligence"]
-        tamagochi.money = data["money"]
-        tamagochi.discipline = data["discipline"]
-        tamagochi.social = data["social"]
-        tamagochi.creativity = data.get("creativity", 50)
+        if data.get('last_action_time'):
+            data['last_action_time'] = datetime.fromisoformat(data['last_action_time'])
+        if data.get('sleep_time'):
+            data['sleep_time'] = datetime.fromisoformat(data['sleep_time'])
+        if data.get('wake_up_time'):
+            data['wake_up_time'] = datetime.fromisoformat(data['wake_up_time'])
         
-        for mood in Mood:
-            if mood.value == data["mood"]:
-                tamagochi.mood = mood
-                break
-                
-        tamagochi.reputation = data["reputation"]
-        tamagochi.is_sleeping = data.get("is_sleeping", False)
-        tamagochi.is_sick = data.get("is_sick", False)
-        tamagochi.skills = data["skills"]
-        tamagochi.career_points = data["career_points"]
-        tamagochi.criminal_points = data["criminal_points"]
-        tamagochi.rating_points = data.get("rating_points", 0)
-        tamagochi.inventory = data["inventory"]
-        tamagochi.friends = data["friends"]
-        
-        return tamagochi
+        return cls(**data)
 
-# Турнирная система
+class TamagotchiGame:
+    def __init__(self):
+        self.tamagotchis: Dict[int, Tamagotchi] = {}
+        self.load_data()
+        
+    def save_data(self):
+        """Сохранить данные в файл"""
+        try:
+            data = {
+                str(user_id): tamagotchi.to_dict()
+                for user_id, tamagotchi in self.tamagotchis.items()
+            }
+            with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving data: {e}")
+    
+    def load_data(self):
+        """Загрузить данные из файла"""
+        try:
+            if os.path.exists(DATA_FILE):
+                with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                for user_id_str, tam_data in data.items():
+                    self.tamagotchis[int(user_id_str)] = Tamagotchi.from_dict(tam_data)
+                logger.info(f"Loaded {len(self.tamagotchis)} tamagotchis")
+        except Exception as e:
+            logger.error(f"Error loading data: {e}")
+    
+    def create_tamagotchi(self, user_id: int, name: str, gender: Gender) -> Tamagotchi:
+        """Создать нового тамагочи"""
+        tamagotchi = Tamagotchi(
+            user_id=user_id,
+            name=name,
+            gender=gender,
+            created_at=datetime.now()
+        )
+        self.tamagotchis[user_id] = tamagotchi
+        self.save_data()
+        return tamagotchi
+    
+    def get_tamagotchi(self, user_id: int) -> Optional[Tamagotchi]:
+        """Получить тамагочи пользователя"""
+        return self.tamagotchis.get(user_id)
+    
+    def perform_action(self, user_id: int, action: Action) -> str:
+        """Выполнить действие и вернуть результат"""
+        tamagotchi = self.get_tamagotchi(user_id)
+        if not tamagotchi:
+            return "У вас нет тамагочи! Создайте его командой /start"
+        
+        if tamagotchi.is_sleeping and action != Action.WAKE_UP:
+            return f"{tamagotchi.name} спит! Разбудите его командой /wakeup"
+        
+        result = ""
+        now = datetime.now()
+        
+        # Обновляем время последнего действия
+        tamagotchi.last_action = action.value
+        tamagotchi.last_action_time = now
+        
+        # В зависимости от действия меняем характеристики
+        if action == Action.WAKE_UP:
+            if not tamagotchi.is_sleeping:
+                return f"{tamagotchi.name} уже не спит!"
+            tamagotchi.is_sleeping = False
+            tamagotchi.wake_up_time = now
+            tamagotchi.happiness += random.randint(5, 15)
+            result = f"{tamagotchi.name} проснулся(ась)! 🌅"
+            tamagotchi.daily_schedule["woke_up"] = True
+            
+        elif action == Action.WASH:
+            tamagotchi.health += random.randint(2, 5)
+            tamagotchi.happiness += random.randint(1, 3)
+            result = f"{tamagotchi.name} умылся(ась). Чистота - залог здоровья! 🚿"
+            tamagotchi.daily_schedule["washed"] = True
+            
+        elif action == Action.BREAKFAST:
+            tamagotchi.health += random.randint(5, 10)
+            result = f"{tamagotchi.name} позавтракал(а). Вкусно и полезно! 🍳"
+            tamagotchi.daily_schedule["breakfast"] = True
+            
+        elif action == Action.EXERCISE:
+            tamagotchi.health += random.randint(10, 15)
+            tamagotchi.happiness += random.randint(2, 5)
+            result = f"{tamagotchi.name} сделал(а) зарядку. Сила в мышцах! 💪"
+            tamagotchi.daily_schedule["exercised"] = True
+            
+        elif action == Action.MAKE_BED:
+            tamagotchi.happiness += random.randint(3, 7)
+            tamagotchi.reputation += random.randint(1, 3)
+            result = f"{tamagotchi.name} заправил(а) кровать. Порядок в комнате! 🛏️"
+            tamagotchi.daily_schedule["made_bed"] = True
+            
+        elif action == Action.READ:
+            tamagotchi.intelligence += random.randint(5, 15)
+            result = f"{tamagotchi.name} читает книгу. Знания растут! 📚"
+            
+        elif action == Action.SCHOOL:
+            lessons = random.randint(1, 6)
+            tamagotchi.intelligence += random.randint(10, 20)
+            tamagotchi.happiness -= random.randint(5, 10)
+            if lessons >= 4:
+                tamagotchi.reputation += random.randint(3, 7)
+                result = f"{tamagotchi.name} отлично учился(ась) в школе ({lessons} уроков)! 🏫"
+            else:
+                tamagotchi.reputation -= random.randint(2, 5)
+                result = f"{tamagotchi.name} прогулял(а) школу ({lessons} уроков пропущено)! 😴"
+            tamagotchi.daily_schedule["studied"] = True
+            
+        elif action == Action.LUNCH:
+            tamagotchi.health += random.randint(5, 10)
+            result = f"{tamagotchi.name} пообедал(а). 🍝"
+            tamagotchi.daily_schedule["lunch"] = True
+            
+        elif action == Action.DINNER:
+            tamagotchi.health += random.randint(5, 10)
+            result = f"{tamagotchi.name} поужинал(а). 🍽️"
+            tamagotchi.daily_schedule["dinner"] = True
+            
+        elif action == Action.BATH:
+            tamagotchi.health += random.randint(8, 12)
+            tamagotchi.happiness += random.randint(5, 10)
+            result = f"{tamagotchi.name} принимает ванну. Расслабление! 🛁"
+            tamagotchi.daily_schedule["bathed"] = True
+            
+        elif action == Action.SHOWER:
+            tamagotchi.health += random.randint(5, 8)
+            result = f"{tamagotchi.name} принимает душ. Освежает! 🚿"
+            tamagotchi.daily_schedule["bathed"] = True
+            
+        elif action == Action.COMPUTER:
+            tamagotchi.happiness += random.randint(10, 20)
+            tamagotchi.intelligence += random.randint(1, 5)
+            tamagotchi.health -= random.randint(2, 5)
+            result = f"{tamagotchi.name} играет на компьютере. 🎮"
+            
+        elif action == Action.DRAW:
+            tamagotchi.happiness += random.randint(5, 15)
+            tamagotchi.intelligence += random.randint(2, 8)
+            result = f"{tamagotchi.name} рисует. Творчество! 🎨"
+            
+        elif action == Action.VISIT:
+            tamagotchi.happiness += random.randint(15, 25)
+            tamagotchi.reputation += random.randint(3, 7)
+            result = f"{tamagotchi.name} ходит в гости к друзьям. 🏡"
+            
+        elif action == Action.WALK:
+            tamagotchi.health += random.randint(5, 10)
+            tamagotchi.happiness += random.randint(5, 15)
+            result = f"{tamagotchi.name} гуляет на улице. 🚶‍♂️"
+            
+        elif action == Action.CINEMA:
+            tamagotchi.happiness += random.randint(10, 20)
+            tamagotchi.money -= random.randint(50, 150)
+            result = f"{tamagotchi.name} идет в кинотеатр. 🎬"
+            
+        elif action == Action.MUSEUM:
+            tamagotchi.intelligence += random.randint(15, 25)
+            tamagotchi.happiness += random.randint(5, 10)
+            result = f"{tamagotchi.name} посещает музей. 🏛️"
+            
+        elif action == Action.EXHIBITION:
+            tamagotchi.intelligence += random.randint(10, 20)
+            tamagotchi.reputation += random.randint(3, 6)
+            result = f"{tamagotchi.name} на выставке. 🖼️"
+            
+        elif action == Action.THEATER:
+            tamagotchi.intelligence += random.randint(12, 22)
+            tamagotchi.reputation += random.randint(5, 10)
+            result = f"{tamagotchi.name} в театре. 🎭"
+            
+        elif action == Action.TUTOR:
+            tamagotchi.intelligence += random.randint(20, 30)
+            tamagotchi.money -= random.randint(200, 400)
+            tamagotchi.happiness -= random.randint(5, 10)
+            result = f"{tamagotchi.name} занимается с репетитором. 👨‍🏫"
+            
+        elif action == Action.PARTY:
+            tamagotchi.happiness += random.randint(25, 35)
+            tamagotchi.health -= random.randint(5, 10)
+            tamagotchi.reputation += random.randint(8, 15)
+            result = f"{tamagotchi.name} устраивает вечеринку! 🎉"
+            
+        elif action == Action.SLEEPOVER:
+            tamagotchi.happiness += random.randint(20, 30)
+            result = f"{tamagotchi.name} устраивает ночевку с друзьями. 🌙"
+            
+        elif action == Action.BAKE:
+            tamagotchi.happiness += random.randint(10, 20)
+            tamagotchi.reputation += random.randint(2, 5)
+            result = f"{tamagotchi.name} печет печенье. Вкусно! 🍪"
+            
+        elif action == Action.FIGHT:
+            tamagotchi.happiness -= random.randint(15, 25)
+            tamagotchi.health -= random.randint(10, 20)
+            tamagotchi.reputation -= random.randint(10, 20)
+            result = f"{tamagotchi.name} подрался(ась). Нехорошо! 👊"
+            
+        elif action == Action.LOVE:
+            tamagotchi.happiness += random.randint(30, 40)
+            tamagotchi.reputation += random.randint(5, 10)
+            result = f"{tamagotchi.name} влюбился(ась)! ❤️"
+            
+        elif action == Action.BLOG:
+            tamagotchi.intelligence += random.randint(5, 10)
+            tamagotchi.reputation += random.randint(3, 8)
+            tamagotchi.money += random.randint(10, 50)
+            result = f"{tamagotchi.name} ведет блог. 📱"
+            
+        elif action == Action.CHAT:
+            tamagotchi.happiness += random.randint(5, 15)
+            tamagotchi.reputation += random.randint(2, 4)
+            result = f"{tamagotchi.name} общается с друзьями. 💬"
+            
+        elif action == Action.SLEEP:
+            if tamagotchi.is_sleeping:
+                return f"{tamagotchi.name} уже спит!"
+            tamagotchi.is_sleeping = True
+            tamagotchi.sleep_time = now
+            tamagotchi.health += random.randint(10, 20)
+            tamagotchi.happiness += random.randint(5, 10)
+            
+            # Проверяем дневные активности
+            completed_tasks = sum(tamagotchi.daily_schedule.values())
+            if completed_tasks >= 5:
+                tamagotchi.money += random.randint(20, 50)
+                result = f"{tamagotchi.name} ложится спать. Хороший день! +{random.randint(20, 50)}💰"
+            else:
+                result = f"{tamagotchi.name} ложится спать. 💤"
+            
+            # Сбрасываем дневное расписание
+            tamagotchi.daily_schedule = {key: False for key in tamagotchi.daily_schedule}
+            
+            # Проверяем, не пора ли увеличить возраст
+            days_alive = (now - tamagotchi.created_at).days
+            if days_alive // 365 > tamagotchi.age and tamagotchi.age < 13:
+                tamagotchi.age += 1
+                result += f"\n🎉 {tamagotchi.name} исполнилось {tamagotchi.age} лет!"
+                
+                # В 13 лет подводим итоги
+                if tamagotchi.age == 13:
+                    result += self._get_final_result(tamagotchi)
+        
+        # Ограничиваем значения характеристик
+        tamagotchi.health = max(0, min(100, tamagotchi.health))
+        tamagotchi.happiness = max(0, min(100, tamagotchi.happiness))
+        tamagotchi.intelligence = max(0, min(100, tamagotchi.intelligence))
+        tamagotchi.reputation = max(0, min(100, tamagotchi.reputation))
+        tamagotchi.money = max(0, tamagotchi.money)
+        
+        # Добавляем действие в историю
+        tamagotchi.actions_history.append(f"{now.strftime('%H:%M')}: {action.value}")
+        if len(tamagotchi.actions_history) > 20:
+            tamagotchi.actions_history.pop(0)
+        
+        self.save_data()
+        return result
+    
+    def _get_final_result(self, tamagotchi: Tamagotchi) -> str:
+        """Получить финальный результат в 13 лет"""
+        score = (
+            tamagotchi.intelligence * 0.3 +
+            tamagotchi.money * 0.3 +
+            tamagotchi.reputation * 0.2 +
+            tamagotchi.health * 0.1 +
+            tamagotchi.happiness * 0.1
+        )
+        
+        if score > 2000:
+            return ("\n🎊 ОТЛИЧНЫЙ РЕЗУЛЬТАТ! 🎊\n"
+                   f"{tamagotchi.name} вырос(ла) успешным человеком!\n"
+                   f"Состояние: {tamagotchi.money} руб.\n"
+                   "Будущее: бизнесмен/ученый/артист 💼")
+        elif score > 1000:
+            return ("\n👍 ХОРОШИЙ РЕЗУЛЬТАТ!\n"
+                   f"{tamagotchi.name} живет обычной жизнью.\n"
+                   f"Состояние: {tamagotchi.money} руб.")
+        else:
+            return ("\n⚠️ ПЛОХОЙ РЕЗУЛЬТАТ!\n"
+                   f"{tamagotchi.name} попал(а) в тюрьму!\n"
+                   "Причина: низкие интеллект и репутация ⛓️")
+    
+    def auto_sleep_check(self):
+        """Автоматически проверяем, не пора ли спать"""
+        now = datetime.now()
+        for tamagotchi in self.tamagotchis.values():
+            if not tamagotchi.is_sleeping:
+                # Если поздно вечером (после 22:00) или бодрствует более 16 часов
+                if now.hour >= 22 or (tamagotchi.wake_up_time and 
+                                    (now - tamagotchi.wake_up_time).seconds > 57600):
+                    tamagotchi.is_sleeping = True
+                    tamagotchi.sleep_time = now
+                    # Немного штрафуем за поздний отход ко сну
+                    tamagotchi.health -= random.randint(5, 10)
+                    logger.info(f"Auto-sleep for {tamagotchi.name}")
+        self.save_data()
+    
+    def get_status(self, user_id: int) -> str:
+        """Получить статус тамагочи"""
+        tamagotchi = self.get_tamagotchi(user_id)
+        if not tamagotchi:
+            return "У вас нет тамагочи! Создайте его командой /start"
+        
+        # Полоски прогресса
+        def progress_bar(value, max_value=100):
+            filled = int(value / max_value * 10)
+            return '█' * filled + '░' * (10 - filled)
+        
+        status = (
+            f"👤 {tamagotchi.name} ({tamagotchi.gender.value})\n"
+            f"📅 Возраст: {tamagotchi.age} лет\n"
+            f"❤️ Здоровье: {progress_bar(tamagotchi.health)} {tamagotchi.health}/100\n"
+            f"😊 Счастье: {progress_bar(tamagotchi.happiness)} {tamagotchi.happiness}/100\n"
+            f"🧠 Интеллект: {progress_bar(tamagotchi.intelligence)} {tamagotchi.intelligence}/100\n"
+            f"💰 Деньги: {tamagotchi.money} руб.\n"
+            f"⭐ Репутация: {progress_bar(tamagotchi.reputation)} {tamagotchi.reputation}/100\n"
+            f"💤 Состояние: {'Спит 😴' if tamagotchi.is_sleeping else 'Бодрствует ☀️'}\n"
+        )
+        
+        if tamagotchi.last_action:
+            status += f"📝 Последнее действие: {tamagotchi.last_action}\n"
+        
+        # Показываем последние 3 действия
+        if tamagotchi.actions_history:
+            status += "\n📜 Последние действия:\n"
+            for action in tamagotchi.actions_history[-3:]:
+                status += f"  • {action}\n"
+        
+        return status
+
 class Tournament:
     def __init__(self):
-        self.leaderboard = {}  # {user_id: {"name": имя_ребенка, "rating": очки, "owner_name": имя_владельца}}
-        self.last_updated = datetime.datetime.now()
+        self.scores = defaultdict(int)
+        self.load_tournament_data()
     
-    def update_player(self, user_id: int, tamagochi: Tamagochi, owner_name: str):
-        rating = tamagochi.update_rating()
-        self.leaderboard[user_id] = {
-            "name": tamagochi.name,
-            "rating": rating,
-            "owner_name": owner_name,
-            "age": tamagochi.age_days // 365,
-            "career": tamagochi.career_points,
-            "criminal": tamagochi.criminal_points
-        }
-        self.last_updated = datetime.datetime.now()
+    def load_tournament_data(self):
+        """Загрузить данные турнира"""
+        try:
+            if os.path.exists(TOURNAMENT_FILE):
+                with open(TOURNAMENT_FILE, 'r', encoding='utf-8') as f:
+                    self.scores = defaultdict(int, json.load(f))
+        except Exception as e:
+            logger.error(f"Error loading tournament data: {e}")
     
-    def get_leaderboard(self, limit: int = 10) -> List[dict]:
-        """Возвращает отсортированный список лидеров"""
-        sorted_players = sorted(
-            self.leaderboard.items(),
-            key=lambda x: x[1]["rating"],
+    def save_tournament_data(self):
+        """Сохранить данные турнира"""
+        try:
+            with open(TOURNAMENT_FILE, 'w', encoding='utf-8') as f:
+                json.dump(dict(self.scores), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving tournament data: {e}")
+    
+    def update_score(self, user_id: int, tamagotchi: Tamagotchi):
+        """Обновить счет в турнире"""
+        score = (
+            tamagotchi.intelligence * 2 +
+            tamagotchi.money // 5 +
+            tamagotchi.reputation * 3 +
+            tamagotchi.health +
+            tamagotchi.happiness * 2
+        )
+        self.scores[user_id] = score
+        self.save_tournament_data()
+    
+    def get_leaderboard(self, game: TamagotchiGame) -> str:
+        """Получить турнирную таблицу"""
+        if not self.scores:
+            return "🏆 Турнирная таблица пуста! Создайте тамагочи и начните играть!"
+        
+        leaderboard = "🏆 ТУРНИРНАЯ ТАБЛИЦА 🏆\n\n"
+        
+        # Сортируем по очкам
+        sorted_scores = sorted(
+            self.scores.items(),
+            key=lambda x: x[1],
             reverse=True
         )
-        return [(user_id, data) for user_id, data in sorted_players[:limit]]
-    
-    def get_player_position(self, user_id: int) -> int:
-        """Возвращает позицию игрока в турнирной таблице (1-based)"""
-        if user_id not in self.leaderboard:
-            return 0
         
-        sorted_players = sorted(
-            self.leaderboard.items(),
-            key=lambda x: x[1]["rating"],
-            reverse=True
-        )
+        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
         
-        for i, (uid, _) in enumerate(sorted_players, 1):
-            if uid == user_id:
-                return i
-        return 0
-    
-    def to_dict(self):
-        return {
-            "leaderboard": self.leaderboard,
-            "last_updated": self.last_updated.isoformat()
-        }
-    
-    @classmethod
-    def from_dict(cls, data: dict):
-        tournament = cls()
-        tournament.leaderboard = data.get("leaderboard", {})
-        if data.get("last_updated"):
-            tournament.last_updated = datetime.datetime.fromisoformat(data["last_updated"])
-        return tournament
+        for i, (user_id, score) in enumerate(sorted_scores[:10]):
+            tamagotchi = game.get_tamagotchi(user_id)
+            if tamagotchi:
+                medal = medals[i] if i < len(medals) else f"{i+1}."
+                leaderboard += f"{medal} {tamagotchi.name}: {score} очков\n"
+        
+        return leaderboard
 
-# Глобальное хранилище данных
-user_tamagochi = {}
-user_names = {}  # Храним имена пользователей для турнирной таблицы
+# Инициализация игры и турнира
+game = TamagotchiGame()
 tournament = Tournament()
-user_save_file = "tamagochi_data.json"
-tournament_save_file = "tournament_data.json"
 
-def load_data():
-    global user_tamagochi, tournament
-    try:
-        with open(user_save_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            for user_id, tam_data in data.items():
-                user_tamagochi[int(user_id)] = Tamagochi.from_dict(tam_data)
-        logger.info("Данные тамагочи загружены")
-    except FileNotFoundError:
-        logger.info("Файл данных тамагочи не найден, создаем новый")
-    
-    try:
-        with open(tournament_save_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            tournament = Tournament.from_dict(data)
-        logger.info("Данные турнира загружены")
-    except FileNotFoundError:
-        logger.info("Файл турнира не найден, создаем новый")
-
-def save_data():
-    # Сохраняем тамагочи
-    data = {}
-    for user_id, tamagochi in user_tamagochi.items():
-        data[str(user_id)] = tamagochi.to_dict()
-    
-    with open(user_save_file, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    
-    # Сохраняем турнир
-    with open(tournament_save_file, 'w', encoding='utf-8') as f:
-        json.dump(tournament.to_dict(), f, ensure_ascii=False, indent=2)
-    
-    logger.info("Данные сохранены")
-
-# ====== ФУНКЦИЯ ДЛЯ ПРОВЕРКИ СНА БОТА ======
-async def check_bot_sleep(update: Update, context: ContextTypes.DEFAULT_TYPE, command_to_check: str = None) -> bool:
-    """
-    Проверяет, спит ли бот. Если спит и команда не /wakeup - игнорирует сообщение.
-    Возвращает True если нужно обрабатывать сообщение, False если игнорировать.
-    """
-    global BOT_IS_SLEEPING
-    
-    if BOT_IS_SLEEPING:
-        # Если бот спит, проверяем, это команда /wakeup?
-        if update.message and update.message.text:
-            text = update.message.text.lower()
-            # Разрешаем только команду /wakeup
-            if text.startswith('/wakeup'):
-                return True  # Обрабатываем /wakeup
-            # Все остальные сообщения игнорируем
-            return False  # Игнорируем
-        elif update.callback_query:
-            # Все callback-запросы игнорируем
-            return False
-    
-    # Если бот не спит - обрабатываем всё
-    return True
-
-# ====== КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ СНОМ БОТА ======
-async def sleep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Укладывает бота спать"""
-    global BOT_IS_SLEEPING
-    
-    # Проверяем, не спит ли уже бот
-    if not await check_bot_sleep(update, context, "/sleep"):
-        return
-    
-    BOT_IS_SLEEPING = True
-    logger.info(f"Бот уснул по команде от пользователя {update.effective_user.id}")
-    
-    await update.message.reply_text(
-        "💤 Бот засыпает... Zzz\n\n"
-        "Теперь бот не будет реагировать на сообщения.\n"
-        "Чтобы разбудить бота, используйте команду: /wakeup"
-    )
-
-async def wakeup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Будит бота"""
-    global BOT_IS_SLEEPING
-    
-    BOT_IS_SLEEPING = False
-    logger.info(f"Бот проснулся по команде от пользователя {update.effective_user.id}")
-    
-    await update.message.reply_text(
-        "☀️ Бот проснулся и готов к работе!\n\n"
-        "Теперь бот снова отвечает на команды.\n"
-        "Чтобы уложить спать: /sleep"
-    )
-
-async def status_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает состояние бота (спит или нет)"""
-    global BOT_IS_SLEEPING
-    
-    # Проверяем, не спит ли бот (для этой команды делаем исключение)
-    if not await check_bot_sleep(update, context, "/status_bot"):
-        return
-    
-    if BOT_IS_SLEEPING:
-        status_text = "💤 Бот спит\nИгнорирует все сообщения кроме /wakeup"
-    else:
-        status_text = "☀️ Бот бодрствует\nОтвечает на все команды"
-    
-    await update.message.reply_text(
-        f"🤖 СОСТОЯНИЕ БОТА:\n\n{status_text}\n\n"
-        f"Команды управления:\n"
-        f"/sleep - уложить бота спать\n"
-        f"/wakeup - разбудить бота\n"
-        f"/status_bot - проверить состояние"
-    )
-
-# ====== ТУРНИРНЫЕ КОМАНДЫ ======
-async def tournament_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает турнирную таблицу"""
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "/tournament"):
-        return
-    
-    user_id = update.effective_user.id
-    
-    # Получаем топ-10 игроков
-    leaderboard = tournament.get_leaderboard(10)
-    
-    if not leaderboard:
-        await update.message.reply_text("🏆 Турнирная таблица пуста!\nСоздайте ребенка и начните играть!")
-        return
-    
-    # Формируем таблицу
-    table_text = "🏆 *ТУРНИРНАЯ ТАБЛИЦА*\n\n"
-    table_text += "Место | Ребенок | Владелец | Очки\n"
-    table_text += "─" * 50 + "\n"
-    
-    for i, (uid, data) in enumerate(leaderboard, 1):
-        medal = ""
-        if i == 1: medal = "🥇 "
-        elif i == 2: medal = "🥈 "
-        elif i == 3: medal = "🥉 "
-        
-        table_text += f"{medal}{i}. {data['name']} | {data['owner_name']} | {data['rating']} очков\n"
-    
-    # Добавляем информацию о текущем игроке
-    position = tournament.get_player_position(user_id)
-    if position > 0:
-        table_text += f"\n📊 *Ваша позиция:* #{position}"
-        if user_id in tournament.leaderboard:
-            table_text += f"\n👤 Ваш ребенок: {tournament.leaderboard[user_id]['name']}"
-            table_text += f"\n🏆 Ваши очки: {tournament.leaderboard[user_id]['rating']}"
-    else:
-        table_text += "\n📊 Вы еще не в турнирной таблице. Создайте ребенка!"
-    
-    table_text += f"\n\n🔄 Обновлено: {tournament.last_updated.strftime('%d.%m.%Y %H:%M')}"
-    
-    keyboard = [
-        [InlineKeyboardButton("🔄 Обновить", callback_data="action_tournament"),
-         InlineKeyboardButton("📊 Мой рейтинг", callback_data="action_rating")],
-        [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        table_text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
-async def rating_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает рейтинг текущего игрока"""
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "/rating"):
-        return
-    
-    user_id = update.effective_user.id
-    
-    if user_id not in user_tamagochi:
-        await update.message.reply_text("У вас еще нет ребенка! Используйте /start для создания.")
-        return
-    
-    tamagochi = user_tamagochi[user_id]
-    position = tournament.get_player_position(user_id)
-    rating = tamagochi.update_rating()
-    
-    rating_text = f"""
-📊 *ВАШ РЕЙТИНГ*
-
-👤 *Ребенок:* {tamagochi.name}
-👑 *Владелец:* {user_names.get(user_id, 'Игрок')}
-🏆 *Турнирные очки:* {rating}
-🏅 *Место в таблице:* #{position if position > 0 else 'не в таблице'}
-
-📈 *КОМПОНЕНТЫ РЕЙТИНГА:*
-• 🚀 Карьерные очки: {tamagochi.career_points} × 2 = {tamagochi.career_points * 2}
-• 🧠 Интеллект: {tamagochi.intelligence} × 3 = {tamagochi.intelligence * 3}
-• ⚖️ Дисциплина: {tamagochi.discipline} × 2 = {tamagochi.discipline * 2}
-• 👥 Социальные: {tamagochi.social} × 1 = {tamagochi.social}
-• 🎨 Творчество: {tamagochi.creativity} × 1 = {tamagochi.creativity}
-• ⚠️ Криминал: {tamagochi.criminal_points} × -5 = -{tamagochi.criminal_points * 5}
-
-💡 *КАК ПОВЫСИТЬ РЕЙТИНГ:*
-1. Учитесь (/daily, /care study) - повышает интеллект
-2. Получайте карьерные очки (хорошая учеба, события)
-3. Следите за дисциплиной
-4. Избегайте криминальных очков (не прогуливайте школу)
-"""
-    
-    keyboard = [
-        [InlineKeyboardButton("🏆 Турнирная таблица", callback_data="action_tournament"),
-         InlineKeyboardButton("📊 Статус ребенка", callback_data="action_status")],
-        [InlineKeyboardButton("🌅 Улучшить рейтинг", callback_data="action_daily"),
-         InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        rating_text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
-# ====== ОБНОВЛЁННЫЕ КОМАНДЫ БОТА С ПРОВЕРКОЙ СНА ======
+# Команды бота
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "/start"):
-        return
-    
+    """Обработчик команды /start"""
     user_id = update.effective_user.id
-    user_name = update.effective_user.first_name or "Игрок"
-    user_names[user_id] = user_name
     
-    if user_id in user_tamagochi:
-        await show_status(update, context)
+    if game.get_tamagotchi(user_id):
+        await update.message.reply_text(
+            "У вас уже есть тамагочи! Используйте /status чтобы посмотреть состояние."
+        )
         return
-    
-    keyboard = [
-        [InlineKeyboardButton("👧 Девочка", callback_data="gender_girl")],
-        [InlineKeyboardButton("👦 Мальчик", callback_data="gender_boy")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        f"👋 Привет, {user_name}! Добро пожаловать в игру 'Виртуальный ребенок'!\n\n"
-        "Вы становитесь родителем ребенка, который будет расти и развиваться.\n"
-        "Теперь доступны соревнования с другими игроками! 🏆\n\n"
-        "К 13 годам ребенок может:\n"
-        "✅ Разбогатеть и стать успешным\n"
-        "❌ Попасть в тюрьму из-за плохого воспитания\n\n"
+        "👋 Добро пожаловать в игру Тамагочи!\n"
+        "Вырастите своего виртуального ребенка от рождения до 13 лет!\n"
+        "Каждый день заботьтесь о нем, развивайте и следите за его успехами.\n\n"
         "Выберите пол вашего ребенка:",
-        reply_markup=reply_markup
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👦 Мальчик", callback_data="gender_boy"),
+                InlineKeyboardButton("👧 Девочка", callback_data="gender_girl")
+            ]
+        ])
     )
 
-async def set_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "set_gender"):
-        return
-    
-    query = update.callback_query
-    await query.answer()
-    
-    gender_type = query.data.split("_")[1]
-    context.user_data['gender'] = Gender.GIRL if gender_type == "girl" else Gender.BOY
-    
-    await query.edit_message_text(
-        f"Отлично! Вы выбрали {context.user_data['gender'].value}!\n\n"
-        f"Придумайте имя для вашего ребенка:\n"
-        f"(Напишите в чат)"
-    )
-
-async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "set_name"):
-        return
-    
-    user_id = update.effective_user.id
-    name = update.message.text.strip()
-    user_name = user_names.get(user_id, "Игрок")
-    
-    if not name or len(name) > 20:
-        await update.message.reply_text("Имя должно быть от 1 до 20 символов. Попробуйте еще раз:")
-        return
-    
-    gender = context.user_data.get('gender', Gender.BOY)
-    tamagochi = Tamagochi(name, gender, user_id)
-    user_tamagochi[user_id] = tamagochi
-    
-    # Добавляем в турнирную таблицу
-    tournament.update_player(user_id, tamagochi, user_name)
-    
-    save_data()
-    
-    await update.message.reply_text(
-        f"🎉 Поздравляем, {user_name}! У вас родился{'ся' if gender == Gender.BOY else 'ась'} {name}!\n\n"
-        f"Теперь вы можете ухаживать за своим ребенком и соревноваться с другими!\n\n"
-        f"🏆 *Новые турнирные команды:*\n"
-        f"/tournament - турнирная таблица\n"
-        f"/rating - ваш рейтинг\n\n"
-        f"🤖 *Управление ботом:*\n"
-        f"/sleep - уложить бота спать\n"
-        f"/wakeup - разбудить бота\n"
-        f"/status_bot - состояние бота\n\n"
-        f"🎮 *Основные команды игры:*\n"
-        f"/status - состояние ребенка\n"
-        f"/daily - ежедневная рутина\n"
-        f"/care - уход за ребенком\n"
-        f"/event - случайное событие\n"
-        f"/destiny - проверить судьбу\n"
-        f"/help - все команды"
-    )
-    
-    await show_main_menu(update, context)
-
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "show_main_menu"):
-        return
-    
-    keyboard = [
-        [InlineKeyboardButton("📊 Статус", callback_data="action_status")],
-        [InlineKeyboardButton("🌅 День ребенка", callback_data="action_daily")],
-        [InlineKeyboardButton("👶 Уход", callback_data="action_care")],
-        [InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
-        [InlineKeyboardButton("📈 Рейтинг", callback_data="action_rating")],
-        [InlineKeyboardButton("🔮 Судьба", callback_data="action_destiny")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.callback_query:
-        await update.callback_query.message.reply_text(
-            "🏆 *Главное меню с турниром:*",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text(
-            "🏆 *Главное меню с турниром:*",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-
-async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "/status"):
-        return
-    
-    user_id = update.effective_user.id
-    
-    if user_id not in user_tamagochi:
-        await update.message.reply_text("У вас еще нет ребенка! Используйте /start для создания.")
-        return
-    
-    tamagochi = user_tamagochi[user_id]
-    
-    # Обновляем естественные изменения
-    tamagochi.natural_changes()
-    
-    age_years = tamagochi.age_days // 365
-    age_months = (tamagochi.age_days % 365) // 30
-    
-    # Индикаторы прогресса
-    def progress_bar(value, max_value=100):
-        filled = int(value / max_value * 10)
-        return "█" * filled + "░" * (10 - filled)
-    
-    # Получаем позицию в турнире
-    position = tournament.get_player_position(user_id)
-    rating = tamagochi.update_rating()
-    
-    # Показываем состояние бота в статусе
-    global BOT_IS_SLEEPING
-    bot_status = "💤 Спит" if BOT_IS_SLEEPING else "☀️ Бодрствует"
-    
-    status_text = f"""
-👤 *{tamagochi.name}* ({tamagochi.gender.value})
-👑 Владелец: {user_names.get(user_id, 'Игрок')}
-🤖 Состояние бота: {bot_status}
-🏆 Рейтинг: {rating} очков (Место #{position if position > 0 else 'не в таблице'})
-
-🎂 *Возраст:* {age_years} лет, {age_months} месяцев ({tamagochi.age_days} дней)
-📊 *Группа:* {tamagochi.age_group.value}
-🎭 *Настроение:* {tamagochi.mood.value}
-📍 *Локация:* {tamagochi.location}
-{'💤 *Спит*' if tamagochi.is_sleeping else '👁️ *Бодрствует*'}
-{'🤒 *Болен*' if tamagochi.is_sick else '✅ *Здоров*'}
-
-📈 *ОСНОВНЫЕ ПОКАЗАТЕЛИ:*
-❤️ Здоровье: {progress_bar(tamagochi.health)} {tamagochi.health}/100
-🍎 Голод: {progress_bar(100 - tamagochi.hunger)} {100 - tamagochi.hunger}/100
-🚿 Чистота: {progress_bar(tamagochi.hygiene)} {tamagochi.hygiene}/100
-⚡ Энергия: {progress_bar(tamagochi.energy)} {tamagochi.energy}/100
-😊 Счастье: {progress_bar(tamagochi.happiness)} {tamagochi.happiness}/100
-
-🧠 *РАЗВИТИЕ:*
-💰 Деньги: {tamagochi.money} руб.
-📚 Интеллект: {tamagochi.intelligence}
-🎨 Творчество: {tamagochi.creativity}
-👥 Общительность: {tamagochi.social}
-⚖️ Дисциплина: {tamagochi.discipline}
-⭐ Репутация: {tamagochi.reputation}
-
-🏆 *НАВЫКИ:*
-• 📚 Учёба: {tamagochi.skills['учёба']}
-• 💪 Спорт: {tamagochi.skills['спорт']}
-• 🎨 Творчество: {tamagochi.skills['творчество']}
-• 👥 Социальные: {tamagochi.skills['социальные']}
-
-🎯 *ЖИЗНЕННЫЙ ПУТЬ:*
-• 🚀 Карьерные очки: {tamagochi.career_points}
-• ⚠️ Криминальные очки: {tamagochi.criminal_points}
-• 🏆 Турнирные очки: {rating}
-"""
-    
-    keyboard = [
-        [InlineKeyboardButton("🔄 Обновить", callback_data="action_status"),
-         InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
-        [InlineKeyboardButton("🌅 Улучшить рейтинг", callback_data="action_daily"),
-         InlineKeyboardButton("📈 Мой рейтинг", callback_data="action_rating")],
-        [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.callback_query:
-        await update.callback_query.message.edit_text(
-            status_text, 
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text(
-            status_text, 
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-    
-    # Обновляем турнирную таблицу
-    if user_id in user_names:
-        tournament.update_player(user_id, tamagochi, user_names[user_id])
-        save_data()
-
-async def daily_routine(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "/daily"):
-        return
-    
-    user_id = update.effective_user.id
-    
-    if user_id not in user_tamagochi:
-        await update.message.reply_text("У вас еще нет ребенка!")
-        return
-    
-    tamagochi = user_tamagochi[user_id]
-    events = []
-    
-    # Сброс дневной статистики
-    tamagochi.daily_stats = {
-        "lessons_attended": 0,
-        "meals_eaten": 0,
-        "studied": 0,
-        "entertainment": 0
-    }
-    
-    # Обновление возраста и естественные изменения
-    tamagochi.update_age()
-    tamagochi.natural_changes()
-    
-    # 1. ПРОБУЖДЕНИЕ
-    if tamagochi.is_sleeping:
-        wake_event = tamagochi.event_gen.get_morning_event(
-            tamagochi.name, tamagochi.gender, tamagochi.discipline
-        )
-        events.append(f"🌅 *Утро:* {wake_event}")
-        tamagochi.is_sleeping = False
-        tamagochi.energy = min(100, tamagochi.energy + 40)
-    
-    # 2. УМЫВАНИЕ
-    if random.random() < 0.8:
-        tamagochi.hygiene = min(100, tamagochi.hygiene + 30)
-        events.append(f"🚿 *Умывание:* {tamagochi.name} умылся{'ась' if tamagochi.gender == Gender.GIRL else ''}")
-    
-    # 3. ЗАВТРАК
-    if tamagochi.hunger > 20:
-        tamagochi.hunger = max(0, tamagochi.hunger - 40)
-        tamagochi.health = min(100, tamagochi.health + 5)
-        tamagochi.daily_stats["meals_eaten"] += 1
-        events.append(f"🍳 *Завтрак:* {tamagochi.name} позавтракал{'а' if tamagochi.gender == Gender.GIRL else ''}")
-    
-    # 4. ЗАРЯДКА (зависит от дисциплины)
-    if tamagochi.discipline > 60 and random.random() < 0.7:
-        tamagochi.health = min(100, tamagochi.health + 10)
-        tamagochi.energy = min(100, tamagochi.energy + 5)
-        tamagochi.skills["спорт"] += 1
-        events.append(f"💪 *Зарядка:* {tamagochi.name} сделал{'а' if tamagochi.gender == Gender.GIRL else ''} утреннюю зарядку")
-    
-    # 5. ЗАПРАВКА КРОВАТИ
-    if tamagochi.discipline > 50:
-        tamagochi.discipline += 2
-        events.append(f"🛏️ *Порядок:* {tamagochi.name} заправил{'а' if tamagochi.gender == Gender.GIRL else ''} кровать")
-    
-    # 6. ШКОЛА (только для школьного возраста)
-    if tamagochi.age_group in [AgeGroup.SCHOOL1, AgeGroup.SCHOOL2, AgeGroup.TEEN]:
-        # Решение идти в школу
-        if tamagochi.discipline > 40 or random.random() < 0.6:
-            lessons = random.randint(3, 6) if tamagochi.discipline > 60 else random.randint(1, 4)
-            tamagochi.is_at_school = True
-            
-            school_event = tamagochi.event_gen.get_school_event(
-                tamagochi.name, tamagochi.gender, lessons
-            )
-            events.append(f"🏫 *Школа:* {school_event}")
-            
-            if lessons > 0:
-                tamagochi.intelligence += lessons
-                tamagochi.skills["учёба"] += lessons
-                tamagochi.discipline += lessons * 2
-                tamagochi.career_points += lessons * 3
-                tamagochi.daily_stats["lessons_attended"] = lessons
-                tamagochi.energy = max(0, tamagochi.energy - lessons * 5)
-            else:
-                tamagochi.discipline -= 10
-                tamagochi.criminal_points += 5
-                tamagochi.happiness += 20
-        else:
-            events.append(f"🏠 *Дом:* {tamagochi.name} остался{'ась' if tamagochi.gender == Gender.GIRL else ''} дома (каникулы/выходной)")
-    
-    # 7. ОБЕД
-    tamagochi.hunger = max(0, tamagochi.hunger - 30)
-    tamagochi.health = min(100, tamagochi.health + 3)
-    tamagochi.daily_stats["meals_eaten"] += 1
-    events.append(f"🥗 *Обед:* {tamagochi.name} пообедал{'а' if tamagochi.gender == Gender.GIRL else ''}")
-    
-    # 8. ДНЕВНЫЕ АКТИВНОСТИ (после школы)
-    evening_event = tamagochi.event_gen.get_evening_event(tamagochi.name, tamagochi.gender)
-    events.append(f"🌇 *День:* {evening_event}")
-    
-    # Эффекты от вечернего занятия
-    tamagochi.happiness = min(100, tamagochi.happiness + 15)
-    tamagochi.energy = max(0, tamagochi.energy - 10)
-    tamagochi.social = min(100, tamagochi.social + 5)
-    tamagochi.daily_stats["entertainment"] += 1
-    
-    # 9. УЖИН
-    tamagochi.hunger = max(0, tamagochi.hunger - 25)
-    tamagochi.daily_stats["meals_eaten"] += 1
-    events.append(f"🍲 *Ужин:* {tamagochi.name} поужинал{'а' if tamagochi.gender == Gender.GIRL else ''}")
-    
-    # 10. ВЕЧЕРНИЕ ПРОЦЕДУРЫ
-    bath_type = random.choice(["ванне", "душе"])
-    tamagochi.hygiene = min(100, tamagochi.hygiene + 40)
-    events.append(f"🛁 *Купание:* {tamagochi.name} помылся{'ась' if tamagochi.gender == Gender.GIRL else ''} в {bath_type}")
-    
-    # 11. СОН
-    tamagochi.is_sleeping = True
-    tamagochi.energy = min(100, tamagochi.energy + 30)
-    tamagochi.health = min(100, tamagochi.health + 8)
-    events.append(f"🌙 *Сон:* {tamagochi.name} лег{'ла' if tamagochi.gender == Gender.GIRL else ''} спать")
-    
-    # Обновляем турнирную таблицу
-    tournament.update_player(user_id, tamagochi, user_names.get(user_id, "Игрок"))
-    
-    # Сохранение
-    save_data()
-    
-    # Формируем ответ
-    routine_text = "📅 *ЕЖЕДНЕВНАЯ РУТИНА:*\n\n"
-    for i, event in enumerate(events, 1):
-        routine_text += f"{i}. {event}\n"
-    
-    # Показываем изменение рейтинга
-    old_rating = tamagochi.rating_points
-    new_rating = tamagochi.update_rating()
-    rating_change = new_rating - old_rating
-    
-    routine_text += f"\n*Итоги дня:*\n"
-    routine_text += f"• 🏫 Уроков посещено: {tamagochi.daily_stats['lessons_attended']}\n"
-    routine_text += f"• 🍽️ Приемов пищи: {tamagochi.daily_stats['meals_eaten']}\n"
-    routine_text += f"• 🎯 Карьерных очков: +{tamagochi.daily_stats['lessons_attended'] * 3}\n"
-    routine_text += f"• 🏆 Рейтинг: {new_rating} очков "
-    if rating_change > 0:
-        routine_text += f"(+{rating_change} 📈)"
-    elif rating_change < 0:
-        routine_text += f"({rating_change} 📉)"
-    else:
-        routine_text += "(без изменений)"
-    
-    keyboard = [
-        [InlineKeyboardButton("📊 Статус", callback_data="action_status"),
-         InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
-        [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        routine_text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
-async def care_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "care_menu"):
-        return
-    
-    keyboard = [
-        [InlineKeyboardButton("🍼 Покормить", callback_data="care_feed"),
-         InlineKeyboardButton("🛁 Помыть", callback_data="care_wash")],
-        [InlineKeyboardButton("💤 Уложить спать", callback_data="care_sleep"),
-         InlineKeyboardButton("☀️ Разбудить", callback_data="care_wake")],
-        [InlineKeyboardButton("💊 Лечить", callback_data="care_heal"),
-         InlineKeyboardButton("📚 Учить", callback_data="care_study")],
-        [InlineKeyboardButton("🎮 Играть", callback_data="care_play"),
-         InlineKeyboardButton("🎨 Творить", callback_data="care_create")],
-        [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.callback_query:
-        await update.callback_query.message.edit_text(
-            "👶 *Уход за ребенком:*\nВыберите действие:",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text(
-            "👶 *Уход за ребенком:*\nВыберите действие:",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-
-async def handle_care(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "handle_care"):
-        return
-    
+async def create_tamagotchi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создание тамагочи после выбора пола"""
     query = update.callback_query
     await query.answer()
     
     user_id = query.from_user.id
+    gender = Gender.BOY if query.data == "gender_boy" else Gender.GIRL
     
-    if user_id not in user_tamagochi:
-        await query.message.edit_text("У вас еще нет ребенка!")
-        return
-    
-    tamagochi = user_tamagochi[user_id]
-    action = query.data.split("_")[1]
-    
-    result_text = ""
-    
-    if action == "feed":
-        if tamagochi.hunger < 20:
-            result_text = f"{tamagochi.name} не хочет есть сейчас 🍽️"
-        else:
-            tamagochi.hunger = max(0, tamagochi.hunger - 40)
-            tamagochi.happiness = min(100, tamagochi.happiness + 10)
-            tamagochi.health = min(100, tamagochi.health + 5)
-            result_text = f"🍼 Вы покормили {tamagochi.name}! Сытость повышена 😋"
-            tamagochi.daily_stats["meals_eaten"] += 1
-            
-    elif action == "wash":
-        if tamagochi.hygiene > 90:
-            result_text = f"{tamagochi.name} уже чист{'ый' if tamagochi.gender == Gender.BOY else 'ая'} 🧼"
-        else:
-            tamagochi.hygiene = min(100, tamagochi.hygiene + 50)
-            tamagochi.happiness = min(100, tamagochi.happiness + 5)
-            if tamagochi.is_sick:
-                tamagochi.health = min(100, tamagochi.health + 15)
-                tamagochi.is_sick = False
-            result_text = f"🛁 Вы помыли {tamagochi.name}! Чистота повышена ✨"
-            
-    elif action == "sleep":
-        if tamagochi.is_sleeping:
-            result_text = f"{tamagochi.name} уже спит 💤"
-        else:
-            tamagochi.is_sleeping = True
-            tamagochi.energy = min(100, tamagochi.energy + 30)
-            tamagochi.health = min(100, tamagochi.health + 10)
-            result_text = f"💤 Вы уложили {tamagochi.name} спать. Энергия восстанавливается 🌙"
-            
-    elif action == "wake":
-        if not tamagochi.is_sleeping:
-            result_text = f"{tamagochi.name} уже не спит ☀️"
-        else:
-            tamagochi.is_sleeping = False
-            tamagochi.energy = min(100, tamagochi.energy + 20)
-            result_text = f"☀️ Вы разбудили {tamagochi.name}! Начинается новый день! ⏰"
-            
-    elif action == "heal":
-        if not tamagochi.is_sick:
-            result_text = f"{tamagochi.name} не болен{'на'} 🏥"
-        else:
-            tamagochi.is_sick = False
-            tamagochi.health = min(100, tamagochi.health + 30)
-            tamagochi.happiness = min(100, tamagochi.happiness + 20)
-            tamagochi.money -= 20
-            result_text = f"💊 Вы вылечили {tamagochi.name}! Здоровье восстановлено ❤️"
-            
-    elif action == "study":
-        if tamagochi.energy < 20:
-            result_text = f"{tamagochi.name} слишком устал{' ' if tamagochi.gender == Gender.BOY else 'а '}для учебы 📚"
-        else:
-            tamagochi.intelligence += random.randint(1, 5)
-            tamagochi.skills["учёба"] += 2
-            tamagochi.energy = max(0, tamagochi.energy - 15)
-            tamagochi.discipline = min(100, tamagochi.discipline + 5)
-            tamagochi.career_points += 3
-            tamagochi.daily_stats["studied"] += 1
-            result_text = f"📚 Вы позанимались с {tamagochi.name}! Интеллект повышен 🧠"
-    
-    elif action == "play":
-        if tamagochi.energy < 15:
-            result_text = f"{tamagochi.name} слишком устал{' ' if tamagochi.gender == Gender.BOY else 'а '}для игр 🎮"
-        else:
-            tamagochi.happiness = min(100, tamagochi.happiness + 25)
-            tamagochi.energy = max(0, tamagochi.energy - 10)
-            tamagochi.social = min(100, tamagochi.social + 5)
-            tamagochi.daily_stats["entertainment"] += 1
-            result_text = f"🎮 Вы поиграли с {tamagochi.name}! Настроение улучшено 😊"
-            
-    elif action == "create":
-        tamagochi.creativity = min(100, tamagochi.creativity + 10)
-        tamagochi.skills["творчество"] += 2
-        tamagochi.happiness = min(100, tamagochi.happiness + 15)
-        result_text = f"🎨 {tamagochi.name} занял{'ась' if tamagochi.gender == Gender.GIRL else ''}ся творчеством! 🖌️"
-    
-    # Обновляем настроение, рейтинг и сохраняем
-    tamagochi.update_mood()
-    tamagochi.update_rating()
-    
-    # Обновляем турнирную таблицу
-    if user_id in user_names:
-        tournament.update_player(user_id, tamagochi, user_names[user_id])
-    
-    save_data()
-    
-    # Показываем результат и возвращаем в меню ухода
-    await query.message.reply_text(result_text)
-    await care_menu(update, context)
-
-async def random_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "/event"):
-        return
-    
-    user_id = update.effective_user.id
-    
-    if user_id not in user_tamagochi:
-        await update.message.reply_text("У вас еще нет ребенка!")
-        return
-    
-    tamagochi = user_tamagochi[user_id]
-    
-    # Получаем случайное событие
-    event_text, effect_type, effect_value, points_type, points_value = tamagochi.event_gen.get_life_event(
-        tamagochi.name, tamagochi.gender
+    # Запрашиваем имя
+    context.user_data['creating_gender'] = gender
+    await query.edit_message_text(
+        f"Вы выбрали {gender.value}! 👶\n"
+        "Введите имя для вашего тамагочи (2-15 символов):"
     )
+
+async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Установка имени тамагочи"""
+    user_id = update.effective_user.id
+    name = update.message.text.strip()
     
-    # Применяем эффекты
-    result_text = f"🎭 *СЛУЧАЙНОЕ СОБЫТИЕ:*\n{event_text}\n\n"
+    if not (2 <= len(name) <= 15):
+        await update.message.reply_text("Имя должно быть от 2 до 15 символов!")
+        return
     
-    if effect_type == "health":
-        tamagochi.health = max(0, min(100, tamagochi.health + effect_value))
-        result_text += f"❤️ Здоровье: {'+' if effect_value > 0 else ''}{effect_value}\n"
-    elif effect_type == "money":
-        tamagochi.money += effect_value
-        result_text += f"💰 Деньги: {'+' if effect_value > 0 else ''}{effect_value} руб.\n"
-    elif effect_type == "intelligence":
-        tamagochi.intelligence += effect_value
-        result_text += f"🧠 Интеллект: {'+' if effect_value > 0 else ''}{effect_value}\n"
-    elif effect_type == "discipline":
-        tamagochi.discipline = max(0, min(100, tamagochi.discipline + effect_value))
-        result_text += f"⚖️ Дисциплина: {'+' if effect_value > 0 else ''}{effect_value}\n"
-    elif effect_type == "social":
-        tamagochi.social = max(0, min(100, tamagochi.social + effect_value))
-        result_text += f"👥 Общительность: {'+' if effect_value > 0 else ''}{effect_value}\n"
-    elif effect_type == "reputation":
-        tamagochi.reputation = max(0, min(100, tamagochi.reputation + effect_value))
-        result_text += f"⭐ Репутация: {'+' if effect_type == 'reputation' and effect_value > 0 else ''}{effect_value}\n"
-    elif effect_type == "creativity":
-        tamagochi.creativity = max(0, min(100, tamagochi.creativity + effect_value))
-        result_text += f"🎨 Творчество: {'+' if effect_value > 0 else ''}{effect_value}\n"
+    if 'creating_gender' not in context.user_data:
+        await update.message.reply_text("Сначала выберите пол командой /start")
+        return
     
-    if points_type == "career":
-        tamagochi.career_points += points_value
-        result_text += f"🚀 Карьерные очки: +{points_value}\n"
-    elif points_type == "criminal":
-        tamagochi.criminal_points += points_value
-        result_text += f"⚠️ Криминальные очки: +{points_value}\n"
-    elif points_type == "happiness":
-        tamagochi.happiness = max(0, min(100, tamagochi.happiness + points_value))
-        result_text += f"😊 Счастье: {'+' if points_value > 0 else ''}{points_value}\n"
+    gender = context.user_data['creating_gender']
+    tamagotchi = game.create_tamagotchi(user_id, name, gender)
     
-    # Обновляем настроение и рейтинг
-    tamagochi.update_mood()
-    tamagochi.update_rating()
-    
-    # Обновляем турнирную таблицу
-    if user_id in user_names:
-        tournament.update_player(user_id, tamagochi, user_names[user_id])
-    
-    save_data()
-    
-    keyboard = [
-        [InlineKeyboardButton("📊 Статус", callback_data="action_status"),
-         InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
-        [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Обновляем турнир
+    tournament.update_score(user_id, tamagotchi)
     
     await update.message.reply_text(
-        result_text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
+        f"🎉 Поздравляем! Вы создали {gender.value} по имени {name}!\n\n"
+        f"👶 {name} только что родился(ась) и ждет вашей заботы!\n\n"
+        f"📋 Основные команды:\n"
+        f"/status - состояние тамагочи\n"
+        f"/actions - доступные действия\n"
+        f"/wakeup - разбудить (если спит)\n"
+        f"/sleep - уложить спать\n"
+        f"/leaderboard - турнирная таблица\n"
+        f"/help - подробная справка\n\n"
+        f"Цель: вырастить успешного ребенка к 13 годам! 🎯"
     )
-
-async def check_destiny(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "/destiny"):
-        return
     
+    del context.user_data['creating_gender']
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать статус тамагочи"""
     user_id = update.effective_user.id
+    status_text = game.get_status(user_id)
     
-    if user_id not in user_tamagochi:
-        await update.message.reply_text("У вас еще нет ребенка!")
+    # Обновляем счет в турнире
+    tamagotchi = game.get_tamagotchi(user_id)
+    if tamagotchi:
+        tournament.update_score(user_id, tamagotchi)
+    
+    await update.message.reply_text(status_text)
+
+async def wakeup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Разбудить тамагочи"""
+    user_id = update.effective_user.id
+    result = game.perform_action(user_id, Action.WAKE_UP)
+    await update.message.reply_text(result)
+
+async def sleep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Уложить тамагочи спать"""
+    user_id = update.effective_user.id
+    result = game.perform_action(user_id, Action.SLEEP)
+    await update.message.reply_text(result)
+
+async def show_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать доступные действия"""
+    user_id = update.effective_user.id
+    tamagotchi = game.get_tamagotchi(user_id)
+    
+    if not tamagotchi:
+        await update.message.reply_text("У вас нет тамагочи! Создайте его командой /start")
         return
     
-    tamagochi = user_tamagochi[user_id]
-    age_years = tamagochi.age_days // 365
-    
-    # Обновляем рейтинг перед проверкой судьбы
-    rating = tamagochi.update_rating()
-    position = tournament.get_player_position(user_id)
-    
-    if age_years < 13:
-        years_left = 13 - age_years
-        days_left = years_left * 365
-        
-        destiny_text = f"""
-🔮 *ПРОВЕРКА СУДЬБЫ {tamagochi.name.upper()}:*
-
-🎂 *Текущий возраст:* {age_years} лет
-⏳ *До 13 лет осталось:* {years_left} лет ({days_left} дней)
-
-📊 *ТЕКУЩИЕ ПОКАЗАТЕЛИ:*
-• 🚀 Карьерные очки: {tamagochi.career_points}
-• ⚠️ Криминальные очки: {tamagochi.criminal_points}
-• 🧠 Интеллект: {tamagochi.intelligence}
-• ⚖️ Дисциплина: {tamagochi.discipline}
-• 💰 Деньги: {tamagochi.money} руб.
-• 🏆 Турнирные очки: {rating} (Место #{position if position > 0 else 'не в таблице'})
-
-💡 *СОВЕТЫ ДЛЯ УСПЕХА:*
-{'- Уделяйте больше внимания учебе!' if tamagochi.career_points < 50 else '- Продолжайте в том же духе!'}
-{'- Контролируйте поведение ребенка!' if tamagochi.criminal_points > 30 else '- Поведение в норме.'}
-{'- Развивайте социальные навыки!' if tamagochi.social < 40 else '- Социальные навыки хорошие.'}
-{'- Участвуйте в турнире!' if position == 0 else f'- Ваше место в турнире: #{position}'}
-"""
-    else:
-        # Определение финальной судьбы в 13 лет
-        rating = tamagochi.update_rating()
-        position = tournament.get_player_position(user_id)
-        
-        if tamagochi.career_points > 150 and tamagochi.criminal_points < 30:
-            destiny = f"""
-🎉 *ПОБЕДА! {tamagochi.name} РАЗБОГАТЕЛ{' ' if tamagochi.gender == Gender.BOY else 'А'}!*
-
-Благодаря отличному воспитанию, {tamagochi.name} стал{' ' if tamagochi.gender == Gender.BOY else 'а '}успешным предпринимателем в 13 лет!
-💰 *Состояние:* {tamagochi.money * 100} рублей
-🏆 *Достижения:* Основал{'а' if tamagochi.gender == Gender.GIRL else ''} свою IT-компанию
-⭐ *Будущее:* Яркая карьера и признание!
-
-*Турнирный результат:* {rating} очков (Место #{position if position > 0 else 'не в таблице'})
-*Ваш результат:* Идеальный родитель! 👑
-"""
-        elif tamagochi.criminal_points > 100:
-            destiny = f"""
-🚨 *ТРАГЕДИЯ! {tamagochi.name} ПОПАЛ{' ' if tamagochi.gender == Gender.BOY else 'А'} В ТЮРЬМУ!*
-
-Из-за плохого воспитания и множества проступков {tamagochi.name} оказался{'ась' if tamagochi.gender == Gender.GIRL else ''} в исправительной колонии.
-😔 *Причина:* {random.choice(['кражи', 'драки', 'вандализм', 'мошенничество'])}
-⏳ *Срок:* {random.randint(2, 5)} года
-💔 *Родители:* Разочарованы и опечалены...
-
-*Турнирный результат:* {rating} очков (Место #{position if position > 0 else 'не в таблице'})
-*Ваш результат:* Провал в воспитании... 😢
-"""
-        elif tamagochi.health < 30:
-            destiny = f"""
-🏥 *СЛАБОЕ ЗДОРОВЬЕ!*
-
-{tamagochi.name} часто болел{' ' if tamagochi.gender == Gender.BOY else 'а '}и имеет серьезные проблемы со здоровьем.
-❤️ *Здоровье:* {tamagochi.health}/100
-💊 *Лечение:* Требуется постоянный медицинский уход
-📉 *Перспективы:* Ограниченные возможности
-
-*Турнирный результат:* {rating} очков (Место #{position if position > 0 else 'не в таблице'})
-*Ваш результат:* Нужно больше заботиться о здоровье ребенка! 🏥
-"""
-        elif tamagochi.intelligence > 120:
-            destiny = f"""
-🎓 *ВУНДЕРКИНД!*
-
-{tamagochi.name} показал{' ' if tamagochi.gender == Gender.BOY else 'а '}выдающиеся интеллектуальные способности!
-🧠 *IQ:* {tamagochi.intelligence}
-🏆 *Достижения:* Победитель международных олимпиад
-🎯 *Будущее:* Стипендия в Гарварде/Оксфорде
-
-*Турнирный результат:* {rating} очков (Место #{position if position > 0 else 'не в таблице'})
-*Ваш результат:* Вы воспитали гения! 🧬
-"""
-        else:
-            destiny = f"""
-👤 *ОБЫЧНАЯ ЖИЗНЬ*
-
-{tamagochi.name} вырос{' ' if tamagochi.gender == Gender.BOY else 'а '}обычным подростком со своими достоинствами и недостатками.
-📊 *Баланс:* Карьера {tamagochi.career_points} / Криминал {tamagochi.criminal_points}
-💼 *Работа:* {random.choice(['офисный сотрудник', 'продавец', 'водитель', 'учитель'])}
-🏠 *Жизнь:* Стабильная, но не выдающаяся
-
-*Турнирный результат:* {rating} очков (Место #{position if position > 0 else 'не в таблице'})
-*Ваш результат:* Средний родитель. Можно было лучше! ⚖️
-"""
-        
-        destiny_text = f"""
-🔮 *ФИНАЛЬНАЯ СУДЬБА В 13 ЛЕТ*
-
-{destiny}
-
-📈 *ИТОГОВАЯ СТАТИСТИКА:*
-• 🎂 Возраст: {age_years} лет
-• 🧠 Интеллект: {tamagochi.intelligence}
-• 💰 Деньги: {tamagochi.money} руб.
-• ⚖️ Дисциплина: {tamagochi.discipline}
-• ⭐ Репутация: {tamagochi.reputation}
-• 👥 Друзей: {len(tamagochi.friends)}
-• 🏆 Навыков: {sum(tamagochi.skills.values())} очков
-• 🏅 Турнирные очки: {rating}
-"""
+    if tamagotchi.is_sleeping:
+        await update.message.reply_text(
+            f"{tamagotchi.name} спит! 💤\n"
+            "Доступные действия:\n"
+            "/wakeup - разбудить\n"
+            "/status - посмотреть состояние"
+        )
+        return
     
     keyboard = [
-        [InlineKeyboardButton("📊 Статус", callback_data="action_status"),
-         InlineKeyboardButton("🏆 Турнир", callback_data="action_tournament")],
-        [InlineKeyboardButton("🏠 Главное меню", callback_data="action_menu")]
+        [
+            InlineKeyboardButton("🚿 Умыться", callback_data="action_wash"),
+            InlineKeyboardButton("🍳 Завтрак", callback_data="action_breakfast")
+        ],
+        [
+            InlineKeyboardButton("💪 Зарядка", callback_data="action_exercise"),
+            InlineKeyboardButton("🛏️ Заправить кровать", callback_data="action_make_bed")
+        ],
+        [
+            InlineKeyboardButton("📚 Читать", callback_data="action_read"),
+            InlineKeyboardButton("🏫 Школа", callback_data="action_school")
+        ],
+        [
+            InlineKeyboardButton("🍝 Обед", callback_data="action_lunch"),
+            InlineKeyboardButton("🍽️ Ужин", callback_data="action_dinner")
+        ],
+        [
+            InlineKeyboardButton("🛁 Ванна", callback_data="action_bath"),
+            InlineKeyboardButton("🚿 Душ", callback_data="action_shower")
+        ],
+        [
+            InlineKeyboardButton("🎮 Играть на ПК", callback_data="action_computer"),
+            InlineKeyboardButton("🎨 Рисовать", callback_data="action_draw")
+        ],
+        [
+            InlineKeyboardButton("🏡 В гости", callback_data="action_visit"),
+            InlineKeyboardButton("🚶 Гулять", callback_data="action_walk")
+        ],
+        [
+            InlineKeyboardButton("🎬 Кино", callback_data="action_cinema"),
+            InlineKeyboardButton("🏛️ Музей", callback_data="action_museum")
+        ],
+        [
+            InlineKeyboardButton("🖼️ Выставка", callback_data="action_exhibition"),
+            InlineKeyboardButton("🎭 Театр", callback_data="action_theater")
+        ],
+        [
+            InlineKeyboardButton("👨‍🏫 Репетитор", callback_data="action_tutor"),
+            InlineKeyboardButton("🎉 Вечеринка", callback_data="action_party")
+        ],
+        [
+            InlineKeyboardButton("🌙 Ночевка", callback_data="action_sleepover"),
+            InlineKeyboardButton("🍪 Печь печенье", callback_data="action_bake")
+        ],
+        [
+            InlineKeyboardButton("👊 Драться", callback_data="action_fight"),
+            InlineKeyboardButton("❤️ Влюбиться", callback_data="action_love")
+        ],
+        [
+            InlineKeyboardButton("📱 Вести блог", callback_data="action_blog"),
+            InlineKeyboardButton("💬 Общаться", callback_data="action_chat")
+        ],
+        [
+            InlineKeyboardButton("😴 Спать", callback_data="action_sleep")
+        ]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        destiny_text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
+        f"Выберите действие для {tamagotchi.name}:\n"
+        "💡 Совет: чередуйте разные активности для лучшего развития!",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "/help"):
-        return
-    
-    help_text = """
-🎮 *БОТ-ТАМАГОЧИ "ВИРТУАЛЬНЫЙ РЕБЕНОК"*
-
-🤖 *УПРАВЛЕНИЕ СОСТОЯНИЕМ БОТА:*
-/sleep - Уложить бота спать (перестанет отвечать)
-/wakeup - Разбудить бота
-/status_bot - Проверить состояние бота
-
-🏆 *ТУРНИРНЫЕ КОМАНДЫ:*
-/tournament - Турнирная таблица (топ-10 игроков)
-/rating - Ваш рейтинг и компоненты очков
-
-👶 *ОСНОВНЫЕ КОМАНДЫ ИГРЫ:*
-/start - Создать нового ребенка
-/status - Показать состояние ребенка
-/daily - Прожить день (утро-вечер)
-/care - Уход за ребенком
-/event - Случайное жизненное событие
-/destiny - Проверить судьбу
-/help - Эта справка
-
-👆 *ИЛИ ИСПОЛЬЗУЙТЕ КНОПКИ В МЕНЮ*
-
-🏆 *КАК РАБОТАЕТ ТУРНИР:*
-Рейтинг = (Карьера×2 + Интеллект×3 + Дисциплина×2 + Социальные×1 + Творчество×1 - Криминал×5)
-• Чем выше рейтинг - тем выше место в таблице
-• Турнир обновляется после каждого действия
-• Все игроки в одном чате соревнуются между собой
-
-📅 *ЕЖЕДНЕВНАЯ РУТИНА:*
-1. Пробуждение (с будильником или без)
-2. Умывание и гигиена
-3. Завтрак
-4. Зарядка (если дисциплина высокая)
-5. Школа (1-6 уроков или прогулы)
-6. Обед
-7. Дневные активности (игры, прогулки, кружки)
-8. Ужин
-9. Вечерние процедуры (ванна/душ)
-10. Сон
-
-🎯 *ЦЕЛЬ ИГРЫ:*
-Воспитать ребенка к 13 годам так, чтобы он:
-✅ *РАЗБОГАТЕЛ* (много карьерных очков)
-✅ *ЗАНЯЛ ВЫСОКОЕ МЕСТО В ТУРНИРЕ*
-❌ *НЕ ПОПАЛ В ТЮРЬМУ* (мало криминальных очков)
-
-*Удачи в воспитании и победы в турнире!* 👨‍👦👩‍👧🏆
-"""
-    await update.message.reply_text(help_text, parse_mode='Markdown')
-
-async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, не спит ли бот
-    if not await check_bot_sleep(update, context, "handle_main_menu"):
-        return
-    
+async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик действий"""
     query = update.callback_query
     await query.answer()
     
-    action = query.data.split("_")[1]
+    user_id = query.from_user.id
+    action_name = query.data.replace("action_", "")
     
-    if action == "status":
-        await show_status(update, context)
-    elif action == "daily":
-        await daily_routine(update, context)
-    elif action == "care":
-        await care_menu(update, context)
-    elif action == "event":
-        await random_event(update, context)
-    elif action == "destiny":
-        await check_destiny(update, context)
-    elif action == "tournament":
-        await tournament_command(update, context)
-    elif action == "rating":
-        await rating_command(update, context)
-    elif action == "menu":
-        await show_main_menu(update, context)
+    try:
+        action = Action[action_name.upper()]
+        result = game.perform_action(user_id, action)
+        
+        # Обновляем счет в турнире
+        tamagotchi = game.get_tamagotchi(user_id)
+        if tamagotchi:
+            tournament.update_score(user_id, tamagotchi)
+        
+        # Добавляем кнопку для новых действий
+        keyboard = [[
+            InlineKeyboardButton("📋 Еще действия", callback_data="more_actions"),
+            InlineKeyboardButton("📊 Статус", callback_data="show_status")
+        ]]
+        
+        await query.edit_message_text(
+            f"{result}\n\n"
+            f"Что дальше?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except KeyError:
+        await query.edit_message_text("Неизвестное действие!")
+
+async def more_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать еще действий"""
+    query = update.callback_query
+    await query.answer()
+    await show_actions_callback(update, context)
+
+async def show_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать статус через callback"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    status_text = game.get_status(user_id)
+    
+    # Добавляем кнопки действий
+    keyboard = [[
+        InlineKeyboardButton("📋 Действия", callback_data="more_actions"),
+        InlineKeyboardButton("🏆 Лидерборд", callback_data="show_leaderboard")
+    ]]
+    
+    await query.edit_message_text(
+        status_text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def show_actions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать действия через callback"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    tamagotchi = game.get_tamagotchi(user_id)
+    
+    if not tamagotchi:
+        await query.edit_message_text("У вас нет тамагочи! Создайте его командой /start")
+        return
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("🚿 Умыться", callback_data="action_wash"),
+            InlineKeyboardButton("🍳 Завтрак", callback_data="action_breakfast")
+        ],
+        [
+            InlineKeyboardButton("💪 Зарядка", callback_data="action_exercise"),
+            InlineKeyboardButton("🛏️ Заправить кровать", callback_data="action_make_bed")
+        ],
+        [
+            InlineKeyboardButton("📚 Читать", callback_data="action_read"),
+            InlineKeyboardButton("🏫 Школа", callback_data="action_school")
+        ],
+        [
+            InlineKeyboardButton("📊 Статус", callback_data="show_status"),
+            InlineKeyboardButton("🏆 Лидерборд", callback_data="show_leaderboard")
+        ]
+    ]
+    
+    await query.edit_message_text(
+        f"Выберите действие для {tamagotchi.name}:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def show_leaderboard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать лидерборд через callback"""
+    query = update.callback_query
+    await query.answer()
+    
+    leaderboard_text = tournament.get_leaderboard(game)
+    
+    keyboard = [[
+        InlineKeyboardButton("📋 Действия", callback_data="more_actions"),
+        InlineKeyboardButton("📊 Мой статус", callback_data="show_status")
+    ]]
+    
+    await query.edit_message_text(
+        leaderboard_text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать турнирную таблицу"""
+    leaderboard_text = tournament.get_leaderboard(game)
+    await update.message.reply_text(leaderboard_text)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Справка по командам"""
+    help_text = (
+        "📚 КОМАНДЫ БОТА ТАМАГОЧИ 📚\n\n"
+        
+        "🎮 ОСНОВНЫЕ КОМАНДЫ:\n"
+        "/start - создать нового тамагочи\n"
+        "/status - показать состояние вашего тамагочи\n"
+        "/actions - показать доступные действия\n"
+        "/wakeup - разбудить тамагочи\n"
+        "/sleep - уложить тамагочи спать\n"
+        "/leaderboard - показать турнирную таблицу\n"
+        "/help - эта справка\n\n"
+        
+        "🎯 ЦЕЛЬ ИГРЫ:\n"
+        "Вырастить тамагочи от рождения до 13 лет.\n"
+        "Чем лучше вы о нем заботитесь, тем успешнее он станет!\n\n"
+        
+        "📈 ХАРАКТЕРИСТИКИ:\n"
+        "❤️ Здоровье - влияет на выживаемость\n"
+        "😊 Счастье - эмоциональное состояние\n"
+        "🧠 Интеллект - умственные способности\n"
+        "💰 Деньги - финансовое состояние\n"
+        "⭐ Репутация - социальный статус\n\n"
+        
+        "🏆 ТУРНИРНАЯ ТАБЛИЦА:\n"
+        "Соревнуйтесь с другими игроками!\n"
+        "Очки начисляются за все характеристики.\n\n"
+        
+        "💡 СОВЕТЫ:\n"
+        "1. Следите за сном тамагочи\n"
+        "2. Балансируйте между работой и отдыхом\n"
+        "3. Развивайте все характеристики\n"
+        "4. Участвуйте в социальных активностях\n"
+        "5. Избегайте драк и прогулов школы\n\n"
+        
+        "📞 ПОДДЕРЖКА:\n"
+        "Бот работает автономно 24/7\n"
+        "Данные сохраняются автоматически"
+    )
+    await update.message.reply_text(help_text)
+
+async def auto_sleep_task(context: ContextTypes.DEFAULT_TYPE):
+    """Автоматическая проверка сна"""
+    try:
+        game.auto_sleep_check()
+        logger.info("Auto-sleep check completed")
+    except Exception as e:
+        logger.error(f"Error in auto_sleep_task: {e}")
+
+async def post_leaderboard_to_channel(context: ContextTypes.DEFAULT_TYPE):
+    """Размещение турнирной таблицы в канале"""
+    try:
+        if CHANNEL_ID:
+            leaderboard_text = tournament.get_leaderboard(game)
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=f"🏆 ЕЖЕДНЕВНАЯ ТУРНИРНАЯ ТАБЛИЦА 🏆\n\n{leaderboard_text}\n\nИграйте: @{context.bot.username}"
+            )
+            logger.info(f"Posted leaderboard to channel {CHANNEL_ID}")
+    except Exception as e:
+        logger.error(f"Error posting to channel: {e}")
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    logger.error(f"Update {update} caused error {context.error}")
+    
+    try:
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "Произошла ошибка. Пожалуйста, попробуйте снова."
+            )
+    except:
+        pass
+
+async def setup_webhook(application: Application):
+    """Настройка webhook для Render"""
+    if WEBHOOK_URL:
+        webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
+        await application.bot.set_webhook(
+            url=webhook_url,
+            max_connections=40,
+            allowed_updates=Update.ALL_TYPES
+        )
+        logger.info(f"Webhook set to: {webhook_url}")
+    else:
+        logger.warning("WEBHOOK_URL not set, using polling")
+
+async def health_check(context: ContextTypes.DEFAULT_TYPE):
+    """Проверка здоровья бота"""
+    try:
+        # Сохраняем данные
+        game.save_data()
+        tournament.save_tournament_data()
+        logger.info("Health check completed - data saved")
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
 
 def main():
-    # Загрузка данных при старте
-    load_data()
+    """Основная функция запуска бота"""
     
-    # Создание приложения
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Создаем приложение
+    application = Application.builder().token(TOKEN).build()
     
-    # Обработчики команд (сначала команды управления сном)
-    application.add_handler(CommandHandler("sleep", sleep_command))
-    application.add_handler(CommandHandler("wakeup", wakeup_command))
-    application.add_handler(CommandHandler("status_bot", status_bot_command))
+    # Добавляем обработчики ошибок
+    application.add_error_handler(error_handler)
     
-    # Турнирные команды
-    application.add_handler(CommandHandler("tournament", tournament_command))
-    application.add_handler(CommandHandler("rating", rating_command))
-    
-    # Обработчики команд игры
+    # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("wakeup", wakeup))
+    application.add_handler(CommandHandler("sleep", sleep))
+    application.add_handler(CommandHandler("actions", show_actions))
+    application.add_handler(CommandHandler("leaderboard", leaderboard))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("status", show_status))
-    application.add_handler(CommandHandler("daily", daily_routine))
-    application.add_handler(CommandHandler("event", random_event))
-    application.add_handler(CommandHandler("destiny", check_destiny))
+    application.add_handler(CommandHandler("stats", status))  # Альтернатива для /status
     
-    # Обработчики сообщений для установки имени
+    # Обработчики callback'ов
+    application.add_handler(CallbackQueryHandler(create_tamagotchi, pattern="^gender_"))
+    application.add_handler(CallbackQueryHandler(handle_action, pattern="^action_"))
+    application.add_handler(CallbackQueryHandler(more_actions, pattern="^more_actions$"))
+    application.add_handler(CallbackQueryHandler(show_status_callback, pattern="^show_status$"))
+    application.add_handler(CallbackQueryHandler(show_actions_callback, pattern="^show_actions$"))
+    application.add_handler(CallbackQueryHandler(show_leaderboard_callback, pattern="^show_leaderboard$"))
+    
+    # Обработчик текстовых сообщений (для имени)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_name))
     
-    # Обработчики callback-запросов
-    application.add_handler(CallbackQueryHandler(set_gender, pattern="^gender_"))
-    application.add_handler(CallbackQueryHandler(handle_main_menu, pattern="^action_"))
-    application.add_handler(CallbackQueryHandler(handle_care, pattern="^care_"))
-    
-    # Сохранение данных при завершении
-    import atexit
-    atexit.register(save_data)
-    
-    # Запуск бота
-    print("🎮 Бот Тамагочи 'Виртуальный ребенок' запущен!")
-    print("🤖 Режим сна бота: АКТИВИРОВАН")
-    print("🏆 Турнирная система: АКТИВИРОВАНА")
-    print("💤 Команда /sleep - уложить бота спать")
-    print("🏆 Команда /tournament - турнирная таблица")
-    print("🚀 Нажмите Ctrl+C для остановки")
-    
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    if WEBHOOK_URL:
+        # Запуск через webhook (для Render)
+        logger.info("Starting bot with webhook...")
+        
+        async def start_webhook():
+            await setup_webhook(application)
+            
+            # Настраиваем планировщик задач
+            job_queue = application.job_queue
+            if job_queue:
+                # Проверка сна каждые 30 минут
+                job_queue.run_repeating(auto_sleep_task, interval=1800, first=10)
+                # Проверка здоровья каждые 5 минут
+                job_queue.run_repeating(health_check, interval=300, first=5)
+                # Постинг турнирной таблицы в канал каждые 24 часа
+                job_queue.run_repeating(post_leaderboard_to_channel, interval=86400, first=60)
+            
+            # Запускаем приложение
+            await application.initialize()
+            await application.start()
+            
+            # Держим приложение запущенным
+            await asyncio.Event().wait()
+        
+        # Запускаем веб-сервер для Render
+        from aiohttp import web
+        
+        async def handle_webhook(request):
+            """Обработчик webhook запросов"""
+            if request.method == "POST":
+                data = await request.json()
+                update = Update.de_json(data, application.bot)
+                await application.process_update(update)
+                return web.Response(text="OK")
+            return web.Response(text="Method not allowed", status=405)
+        
+        async def handle_health(request):
+            """Health check endpoint для Render"""
+            return web.Response(text="OK", status=200)
+        
+        async def start_server():
+            """Запуск сервера"""
+            app = web.Application()
+            app.router.add_post(f'/{TOKEN}', handle_webhook)
+            app.router.add_get('/health', handle_health)
+            app.router.add_get('/', handle_health)
+            
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '0.0.0.0', PORT)
+            await site.start()
+            
+            logger.info(f"Server started on port {PORT}")
+            
+            # Запускаем бота
+            await start_webhook()
+        
+        # Запускаем asyncio event loop
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(start_server())
+        loop.run_forever()
+        
+    else:
+        # Запуск через polling (для локальной разработки)
+        logger.info("Starting bot with polling...")
+        
+        # Настраиваем планировщик задач
+        job_queue = application.job_queue
+        if job_queue:
+            # Проверка сна каждые 30 минут
+            job_queue.run_repeating(auto_sleep_task, interval=1800, first=10)
+            # Проверка здоровья каждые 5 минут
+            job_queue.run_repeating(health_check, interval=300, first=5)
+            # Постинг турнирной таблицы в канал каждые 24 часа
+            job_queue.run_repeating(post_leaderboard_to_channel, interval=86400, first=60)
+        
+        # Запуск polling
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
 
 if __name__ == '__main__':
     main()
