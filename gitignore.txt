@@ -1,6 +1,0 @@
-pycache/
-*.pyc
-.env
-*.json
-venv/
-.vscode/
